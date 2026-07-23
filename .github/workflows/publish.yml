@@ -1,0 +1,119 @@
+name: Publish GHCR image
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+
+permissions:
+  contents: read
+  packages: write
+  attestations: write
+  id-token: write
+
+concurrency:
+  group: publish-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  IMAGE: ghcr.io/coldercoder/shufflemuse
+  DOCKER_BUILD_RECORD_UPLOAD: "false"
+
+jobs:
+  publish:
+    name: Publish
+    if: github.repository == 'ColderCoder/ShuffleMuse'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out source
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+
+      - name: Validate and expand version
+        id: version
+        shell: bash
+        run: |
+          if [[ ! "$GITHUB_REF_NAME" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a stable semantic version tag such as v0.1.0" >&2
+            exit 1
+          fi
+          version="${GITHUB_REF_NAME#v}"
+          IFS=. read -r major minor patch <<<"$version"
+          {
+            echo "version=$version"
+            echo "minor=$major.$minor"
+            echo "major=$major"
+            echo "build_date=$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          } >>"$GITHUB_OUTPUT"
+
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@c7c53464625b32c7a7e944ae62b3e17d2b600130 # v3
+
+      - name: Set up Buildx
+        uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
+
+      - name: Log in to GHCR
+        uses: docker/login-action@c94ce9fb468520275223c153574b00df6fe4bcc9 # v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare image metadata
+        id: metadata
+        uses: docker/metadata-action@c299e40c65443455700f0fdfc63efafe5b349051 # v5
+        with:
+          images: ${{ env.IMAGE }}
+          tags: |
+            type=raw,value=${{ steps.version.outputs.version }}
+            type=raw,value=${{ steps.version.outputs.minor }}
+            type=raw,value=${{ steps.version.outputs.major }}
+            type=raw,value=latest
+          labels: |
+            org.opencontainers.image.title=ShuffleMuse
+            org.opencontainers.image.description=A lightweight self-hosted music library player
+            org.opencontainers.image.source=https://github.com/ColderCoder/ShuffleMuse
+            org.opencontainers.image.documentation=https://github.com/ColderCoder/ShuffleMuse/blob/main/README.md
+            org.opencontainers.image.licenses=MIT
+            org.opencontainers.image.version=${{ steps.version.outputs.version }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ steps.version.outputs.build_date }}
+
+      - name: Build and push image
+        id: build
+        uses: docker/build-push-action@10e90e3645eae34f1e60eeb005ba3a3d33f178e8 # v6
+        with:
+          context: .
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ steps.metadata.outputs.tags }}
+          labels: ${{ steps.metadata.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.version.outputs.version }}
+            REVISION=${{ github.sha }}
+            BUILD_DATE=${{ steps.version.outputs.build_date }}
+          cache-from: type=gha,scope=release
+          cache-to: type=gha,mode=max,scope=release
+          provenance: mode=max
+          sbom: true
+
+      - name: Attest image provenance
+        uses: actions/attest@f7c74d28b9d84cb8768d0b8ca14a4bac6ef463e6 # v4
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+
+      - name: Remove superseded technical package versions
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          package_path="users/${GITHUB_REPOSITORY_OWNER}/packages/container/shufflemuse"
+          gh api --paginate "${package_path}/versions?per_page=100" \
+            --jq '.[] | select((.metadata.container.tags | length) == 1 and (.metadata.container.tags[0] | startswith("sha256-"))) | .id' |
+            while read -r version_id; do
+              gh api --method DELETE "${package_path}/versions/${version_id}"
+            done
+
+      - name: Verify public manifest
+        run: |
+          docker logout ghcr.io
+          docker buildx imagetools inspect "${IMAGE}:${{ steps.version.outputs.version }}"

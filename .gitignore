@@ -1,0 +1,13 @@
+*.db
+*.gob
+data/
+web/dist/*
+!web/dist/.gitkeep
+web/node_modules/
+.env
+shufflemuse
+/server
+music/
+index.test
+*.test
+web/tsconfig.tsbuildinfo

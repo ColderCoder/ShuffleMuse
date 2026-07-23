@@ -1,0 +1,47 @@
+# syntax=docker/dockerfile:1.7
+
+FROM oven/bun:1.3.14-alpine@sha256:5acc90a93e91ff07bf72aa90a7c9f0fa189765aec90b47bdbf2152d2196383c0 AS frontend
+WORKDIR /app/web
+COPY web/package.json web/bun.lock ./
+RUN bun install --frozen-lockfile
+COPY web/index.html web/tsconfig.json web/tsconfig.node.json web/vite.config.ts web/vitest.config.ts ./
+COPY web/src ./src
+RUN bun run build
+
+FROM golang:1.26.5-alpine3.24@sha256:0178a641fbb4858c5f1b48e34bdaabe0350a330a1b1149aabd498d0699ff5fb2 AS builder
+ARG GOPROXY=https://proxy.golang.org,direct
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG BUILD_DATE=unknown
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN GOPROXY="$GOPROXY" go mod download
+COPY cmd ./cmd
+COPY internal ./internal
+COPY web/embed.go ./web/embed.go
+COPY --from=frontend /app/web/dist ./web/dist
+RUN CGO_ENABLED=0 GOOS=linux go build -trimpath \
+    -ldflags="-s -w -X main.version=${VERSION} -X main.revision=${REVISION} -X main.buildDate=${BUILD_DATE}" \
+    -o /shufflemuse ./cmd/server/
+
+FROM alpine:3.24.1@sha256:28bd5fe8b56d1bd048e5babf5b10710ebe0bae67db86916198a6eec434943f8b
+ARG VERSION=dev
+ARG REVISION=unknown
+ARG BUILD_DATE=unknown
+LABEL org.opencontainers.image.title="ShuffleMuse" \
+      org.opencontainers.image.description="A lightweight self-hosted music library player" \
+      org.opencontainers.image.source="https://github.com/ColderCoder/ShuffleMuse" \
+      org.opencontainers.image.url="https://github.com/ColderCoder/ShuffleMuse" \
+      org.opencontainers.image.documentation="https://github.com/ColderCoder/ShuffleMuse/blob/main/README.md" \
+      org.opencontainers.image.licenses="MIT" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.created="${BUILD_DATE}"
+RUN apk add --no-cache ffmpeg=8.1.2-r0 && \
+    adduser -D -H -g '' shufflemuse && \
+    mkdir -p /data && \
+    chown shufflemuse:shufflemuse /data
+COPY --from=builder /shufflemuse /usr/local/bin/shufflemuse
+USER shufflemuse
+EXPOSE 8080
+ENTRYPOINT ["shufflemuse"]
