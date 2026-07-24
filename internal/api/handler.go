@@ -86,16 +86,18 @@ func NewAPI(cfg *config.Config, idx *index.Index, tagStore *tags.Store, router S
 	if realIPHeader == "" {
 		realIPHeader = "remote"
 	}
+	metadataProbe := stream.NewMetadataProbe(media, stream.MetadataConfig{
+		Capacity: metadataCapacity, NegativeTTL: cfg.MediaNegativeCache, TaskTimeout: cfg.MediaTaskTimeout,
+	})
 	apiHandler := &API{
-		Index:  idx,
-		Tags:   tagStore,
-		Stream: router,
-		Metadata: stream.NewMetadataProbe(media, stream.MetadataConfig{
-			Capacity: metadataCapacity, NegativeTTL: cfg.MediaNegativeCache, TaskTimeout: cfg.MediaTaskTimeout,
-		}),
+		Index:    idx,
+		Tags:     tagStore,
+		Stream:   router,
+		Metadata: metadataProbe,
 		Covers: cover.NewLoader(media, cover.Config{
 			Entries: cfg.CoverCacheEntries, Bytes: cfg.CoverCacheBytes,
 			NegativeTTL: cfg.MediaNegativeCache, TaskTimeout: cfg.MediaTaskTimeout,
+			EmbeddedProbe: metadataProbe.ProbeEmbedded,
 		}),
 		Config:     cfg,
 		Auth:       a,

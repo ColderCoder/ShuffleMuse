@@ -2,7 +2,7 @@ name: shufflemuse
 
 services:
   shufflemuse:
-    image: ghcr.io/coldercoder/shufflemuse:0.1.0
+    image: ghcr.io/coldercoder/shufflemuse:0.1.1
     ports:
       - "127.0.0.1:8080:8080"
     volumes:

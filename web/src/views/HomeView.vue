@@ -154,7 +154,7 @@ onBeforeUnmount(() => {
 
     <div v-if="player.currentTrack && !player.playlistLoading" class="now-playing-info">
       <p class="now-playing-label">Now Playing</p>
-      <p class="now-playing-track-name">{{ player.currentTrack.name }}</p>
+      <p class="now-playing-track-name">{{ player.displayTitle }}</p>
       <router-link
         class="now-playing-track-dir"
         :to="browseTarget"
@@ -166,7 +166,7 @@ onBeforeUnmount(() => {
         v-if="!coverFailed"
         class="now-playing-cover"
         :src="coverSrc"
-        :alt="`Cover art for ${player.currentTrack.name}`"
+        :alt="`Cover art for ${player.displayTitle}`"
         decoding="async"
         fetchpriority="low"
         @load="handleCoverLoad"
@@ -176,7 +176,7 @@ onBeforeUnmount(() => {
         v-else
         class="now-playing-cover now-playing-cover--placeholder"
         role="img"
-        :aria-label="`No cover art available for ${player.currentTrack.name}`"
+        :aria-label="`No cover art available for ${player.displayTitle}`"
       >
         <span class="default-cover-brand" aria-hidden="true">ShuffleMuse</span>
         <span class="default-cover-record" aria-hidden="true"></span>

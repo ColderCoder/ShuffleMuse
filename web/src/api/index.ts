@@ -90,6 +90,7 @@ export interface BrowseResponse {
 }
 
 export interface FileMetadata {
+  title?: string
   codec: string
   bitrateKbps: number
   bitrateApproximate: boolean

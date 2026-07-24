@@ -133,6 +133,57 @@ describe('player store server queues', () => {
     expect(player.currentTrack).toBeNull()
   })
 
+  it('shows the filename until the lazy metadata title arrives', async () => {
+    const pending = deferred<api.FileMetadata>()
+    vi.mocked(api.getFileMetadata).mockReturnValueOnce(pending.promise)
+    const player = usePlayerStore()
+
+    await player.preparePlaylist()
+    expect(player.displayTitle).toBe('one')
+
+    pending.resolve({
+      title: '  Metadata Title  ',
+      codec: 'FLAC',
+      bitrateKbps: 987,
+      bitrateApproximate: false,
+      durationSeconds: 240,
+    })
+    await vi.waitFor(() => expect(player.displayTitle).toBe('Metadata Title'))
+  })
+
+  it('never applies a stale metadata title after changing tracks', async () => {
+    const oldMetadata = deferred<api.FileMetadata>()
+    vi.mocked(api.createQueue).mockResolvedValue(page(
+      'two-tracks', 1, 2, [item(0, 'one'), item(1, 'two')],
+    ))
+    vi.mocked(api.getFileMetadata).mockImplementation(id => (
+      id === 'one'
+        ? oldMetadata.promise
+        : Promise.resolve({
+            title: 'Second Title',
+            codec: 'FLAC',
+            bitrateKbps: 1000,
+            bitrateApproximate: false,
+            durationSeconds: 180,
+          })
+    ))
+    const player = usePlayerStore()
+
+    await player.preparePlaylist()
+    await player.playAt(1)
+    await vi.waitFor(() => expect(player.displayTitle).toBe('Second Title'))
+
+    oldMetadata.resolve({
+      title: 'Stale First Title',
+      codec: 'FLAC',
+      bitrateKbps: 900,
+      bitrateApproximate: false,
+      durationSeconds: 200,
+    })
+    await Promise.resolve()
+    expect(player.displayTitle).toBe('Second Title')
+  })
+
   it('toggles active playback between paused and playing', async () => {
     const player = usePlayerStore()
     await player.preparePlaylist()

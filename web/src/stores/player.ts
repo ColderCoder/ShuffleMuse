@@ -104,6 +104,7 @@ export const usePlayerStore = defineStore('player', () => {
 
   const queuePosition = computed(() => (currentTrack.value && queue.value ? activeIndex.value + 1 : 0))
   const queueTotal = computed(() => queue.value?.total ?? 0)
+  const displayTitle = computed(() => mediaMetadata.value?.title?.trim() || currentTrack.value?.name || '')
   const queuePageCount = computed(() => Math.max(1, Math.ceil(queueTotal.value / (queue.value?.pageSize ?? apiQueuePageSize()))))
   const currentPage = computed(() => pageForIndex(activeIndex.value))
   const sidebarItems = computed(() => pages.value.get(sidebarPage.value)?.items ?? [])
@@ -784,6 +785,7 @@ export const usePlayerStore = defineStore('player', () => {
     queuePageCount,
     queuePosition,
     queueTotal,
+    displayTitle,
     cachedPageCount,
     error,
     playlistLoading,

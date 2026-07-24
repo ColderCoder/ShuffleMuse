@@ -16,7 +16,7 @@ flowchart LR
     API --> Queue[Bounded server queue cache]
     API --> Manager[Strict media lane manager]
     Manager --> FFmpeg[ffmpeg transcoding / cover]
-    Manager --> FFprobe[ffprobe metadata]
+    Manager --> FFprobe[ffprobe metadata / embedded cover descriptor]
     Rescanner[Rescanner] -->|atomic publish| Snapshot
     Rescanner --> Files
     Rescanner -->|legacy tag migration| Tags
@@ -213,15 +213,15 @@ Original 使用 `http.ServeContent`：
 - 转码 lane：最多 1 个长 Opus；
 - 辅助 lane：最多 1 个 metadata、cover descriptor 或 cover render。
 
-两个 lane 有独立等待队列。辅助任务中 metadata/descriptor 为高优先级，连续最多 4 个后若封面转换等待则让出一次。相同文件身份的 metadata/封面在 Acquire 前 singleflight；Manager 统一追踪 active task、取消和关机 WaitGroup。总数为 1 且未显式设置辅助保留时使用旧共享模式。
+两个 lane 有独立等待队列。辅助任务中 metadata/descriptor 为高优先级，连续最多 4 个后若封面转换等待则让出一次。同一文件身份的 metadata 与内嵌封面 descriptor 合并为一次 ffprobe，并在 Acquire 前共享 singleflight；Manager 统一追踪 active task、取消和关机 WaitGroup。总数为 1 且未显式设置辅助保留时使用旧共享模式。
 
 ### Metadata LRU
 
-metadata 缓存键包含绝对路径、大小和 mtime。成功 LRU 固定默认 4096 条；确定性解析失败进入有界 30 秒负缓存，busy、deadline、取消和临时 I/O 不缓存。底层任务使用独立 deadline；单个 waiter 取消不影响其他 waiter，全部离开才取消底层任务。
+共享 probe 一次读取 TITLE、第一音轨 codec/bitrate/duration 与第一视频流尺寸，stdout 上限 64 KiB。缓存键包含绝对路径、大小和 mtime，成功 LRU 固定默认 4096 条；确定性命令或 JSON 失败进入有界 30 秒负缓存，busy、deadline、取消和临时 I/O 不缓存。音频 metadata 与封面尺寸分别校验，任一部分无效不隐藏另一部分。底层任务使用独立 deadline；单个 waiter 取消不影响其他 waiter，全部离开才取消底层任务。
 
 ### 封面
 
-Loader 先寻找同目录、大小写不敏感的 `cover.jpg`/`cover.png`（JPEG 优先），不存在时才用 ffprobe 发现内嵌封面。外置源超过 20 MiB、8192 单边或 40 MP 时稳定返回 not-found；超过 1536 单边或 1 MiB 才进入 `AuxRender`。FFmpeg 单线程输出最长边 1024、不放大的 JPEG q3，PNG 和带透明度的内嵌图先合成白底。JPEG 结果只有达到 15% 节省才替代原文件。
+Loader 按 `cover.jpg` → `cover.png` → `folder.jpg` → `folder.png` 寻找同目录、大小写不敏感的外置封面，不存在时才消费共享 probe 已发现的内嵌封面 descriptor。查找不递归，也不扩展到其他文件格式。外置源超过 20 MiB、8192 单边或 40 MP 时稳定返回 not-found；超过 1536 单边或 1 MiB 才进入 `AuxRender`。FFmpeg 单线程输出最长边 1024、不放大的 JPEG q3，PNG 和带透明度的内嵌图先合成白底。JPEG 结果只有达到 15% 节省才替代原文件。
 
 HEAD/304 只读取 descriptor，不启动 FFmpeg。未转换外置图使用 `Open` + `ServeContent` 原样发送；转换字节只在当前请求或同一 in-flight 请求组中存在，结束后立即释放，不进入 LRU。服务端只保留小型 descriptor LRU 和 30 秒负缓存。ETag 包含源身份、阈值与编码规格，成功响应允许浏览器私有缓存 1 小时。
 
