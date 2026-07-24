@@ -1,5 +1,7 @@
 # ShuffleMuse
 
+This repo has very little human-in-the-loop involvement.
+
 ShuffleMuse 是一个面向个人和小型自托管场景的轻量音乐库播放器。它使用 Go 扫描本地音频目录，以单个 HTTP 服务同时提供 Vue 3 Web UI、原文件串流、FFmpeg Opus 转码、标签管理和缺失文件清理。
 
 [![CI](https://github.com/ColderCoder/ShuffleMuse/actions/workflows/ci.yml/badge.svg)](https://github.com/ColderCoder/ShuffleMuse/actions/workflows/ci.yml)
@@ -97,6 +99,57 @@ environment:
 ```
 
 公网部署还应由反向代理终止 HTTPS，并设置 `MUSIC_COOKIE_SECURE: "true"`。不要为了让代理请求通过而把代理或 Docker 网桥加入认证白名单；真实 IP 解析和免认证白名单是两个不同的信任边界。完整示例和解释见[配置与安全](docs/CONFIGURATION.md)及[部署与运维](docs/OPERATIONS.md)。
+
+### 同时提供局域网与本机 Cloudflare Tunnel 访问
+
+当局域网客户端直接访问宿主机，而宿主机上的 `cloudflared` 通过
+`127.0.0.1` 回源同一个 ShuffleMuse 实例时，建议分别绑定 loopback 和
+固定的局域网地址，不要无条件发布到全部接口：
+
+```yaml
+ports:
+  - "127.0.0.1:8080:8080"
+  - "192.168.1.20:8080:8080"
+environment:
+  MUSIC_PASSWORD: "${MUSIC_PASSWORD:?set MUSIC_PASSWORD}"
+  MUSIC_AUTH_WHITELIST_SUBNETS: ""
+  MUSIC_REAL_IP_HEADER: "cf-connecting-ip"
+  MUSIC_TRUSTED_PROXY_SUBNETS: "ACTUAL_TUNNEL_PEER_IP/32"
+  MUSIC_COOKIE_SECURE: "true"
+  MUSIC_ALLOWED_HOSTS: >-
+    localhost,127.0.0.1,::1,192.168.1.20,music.lan,music.example.com
+```
+
+真实密码应通过宿主机环境、Compose 插值使用的未提交 `.env` 或其他本地
+密钥管理方式提供，不能提交到公开仓库。应用本身仍只读取进程环境；
+Compose 的变量插值不改变这一点。
+
+一个实例只有一套 Cookie 配置，因此有两种安全模式：
+
+| 目标 | `MUSIC_AUTH_WHITELIST_SUBNETS` | `MUSIC_COOKIE_SECURE` | 局域网要求 |
+| --- | --- | --- | --- |
+| 两个入口都使用密码 | 空 | `true` | 局域网也必须通过 HTTPS 访问 |
+| 可信局域网免登录，Tunnel 使用密码 | 最窄的可信 LAN CIDR | `true` | 可直接使用 HTTP，但该网段内所有设备均免登录 |
+
+不要为了让局域网 HTTP 密码登录生效而把 Secure Cookie 关闭后继续暴露
+公网入口。若局域网不能部署 HTTPS，且该网段确实没有访客、IoT 或其他
+不可信设备，可将其最窄 CIDR 写入认证白名单；Tunnel 对端、Docker 网桥和
+`127.0.0.1` 绝不能加入认证白名单，否则所有 Tunnel 用户都会免登录。
+
+`cloudflared` 的回源 URL 是 `http://127.0.0.1:8080`，并不保证容器内
+ShuffleMuse 看到的 TCP 对端仍是 `127.0.0.1`；Docker NAT 后通常可能是
+网桥地址。必须用实际 Tunnel 请求确认该对端，再将最窄的单地址 CIDR
+（IPv4 `/32`、IPv6 `/128`）写入
+`MUSIC_TRUSTED_PROXY_SUBNETS`。配置正确后，Tunnel 请求使用
+`CF-Connecting-IP` 进行逐访客登录封禁，局域网直连请求则因对端不可信而
+忽略伪造头部并使用其 TCP 来源地址。若两类请求在容器内无法区分，不应
+启用 LAN 认证白名单，应改为局域网 HTTPS 并让两边都使用密码。
+
+Cloudflare Tunnel 的 `httpHostHeader` 应保持未设置，以保留浏览器访问的
+公网 Host；改写成内部 `localhost` 会使写请求的 Origin 与 Host 不一致。
+公网侧建议再启用 Cloudflare Access，并为该主机名设置缓存绕过。宿主机
+防火墙只允许 LAN CIDR 访问局域网绑定，路由器不要转发 8080；Tunnel
+只需主动出站连接，不需要公网入站端口。
 
 ## 数据与备份
 
