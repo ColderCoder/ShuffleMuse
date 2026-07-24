@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { flushPromises, mount } from '@vue/test-utils'
+import { createMemoryHistory, createRouter } from 'vue-router'
 import NowPlayingBar from './NowPlayingBar.vue'
 import { usePlayerStore } from '../stores/player'
 import { useLibraryStore } from '../stores/library'
@@ -12,6 +13,19 @@ vi.mock('../api', () => ({
   removeTag: vi.fn(),
   getTags: vi.fn().mockResolvedValue([]),
 }))
+
+async function mountBar() {
+  const router = createRouter({
+    history: createMemoryHistory(),
+    routes: [
+      { path: '/', component: { template: '<div />' } },
+      { path: '/browse', name: 'browse', component: { template: '<div />' } },
+    ],
+  })
+  await router.push('/')
+  await router.isReady()
+  return mount(NowPlayingBar, { global: { plugins: [router] } })
+}
 
 describe('NowPlayingBar', () => {
   beforeEach(() => {
@@ -34,6 +48,7 @@ describe('NowPlayingBar', () => {
       streamUrl: '/api/stream/one?mode=original',
     }
     player.mediaMetadata = {
+      title: 'Metadata Title',
       codec: 'FLAC',
       bitrateKbps: 987,
       bitrateApproximate: false,
@@ -43,10 +58,15 @@ describe('NowPlayingBar', () => {
     player.currentTime = 60
     const seek = vi.spyOn(player, 'seek').mockResolvedValue(undefined)
 
-    const wrapper = mount(NowPlayingBar)
+    const wrapper = await mountBar()
     const labels = wrapper.findAll('.np-transport button').map(button => button.attributes('aria-label'))
     expect(labels).toEqual(['Previous track', 'Play', 'Next track'])
     expect(wrapper.text()).toContain('FLAC · 987 kbps')
+    expect(wrapper.get('.np-track-name').text()).toBe('Metadata Title')
+    const path = wrapper.get('.np-track-path')
+    expect(path.element.tagName).toBe('A')
+    expect(decodeURIComponent(path.attributes('href') ?? '')).toBe('/browse?dir=Album')
+    expect(path.attributes('aria-label')).toBe('Browse folder containing Metadata Title')
 
     const slider = wrapper.get('input[aria-label="Playback position"]')
     expect(slider.attributes('max')).toBe('240')
@@ -72,7 +92,7 @@ describe('NowPlayingBar', () => {
       streamUrl: '/api/stream/one?mode=opus',
     }
 
-    const wrapper = mount(NowPlayingBar)
+    const wrapper = await mountBar()
 
     expect(wrapper.text()).toContain('OPUS · 224 kbps')
     const opus = wrapper.get('.stream-mode-button:last-child')
@@ -95,7 +115,7 @@ describe('NowPlayingBar', () => {
       filepath: 'one.flac',
       streamUrl: '/api/stream/one?mode=original',
     }
-    const wrapper = mount(NowPlayingBar)
+    const wrapper = await mountBar()
 
     player.currentTrack = {
       id: 'two',
@@ -122,7 +142,7 @@ describe('NowPlayingBar', () => {
       filepath: 'one.flac',
       streamUrl: '/api/stream/one?mode=original',
     }
-    const wrapper = mount(NowPlayingBar)
+    const wrapper = await mountBar()
     await flushPromises()
 
     await wrapper.get('.btn-fav').trigger('click')

@@ -386,6 +386,7 @@ func TestFileMetadataEndpoint(t *testing.T) {
 	env := setupTestEnv(t)
 	defer env.teardown()
 	env.api.Metadata = fixedMediaProbe{metadata: stream.Metadata{
+		Title:           "Metadata Title",
 		Codec:           "FLAC",
 		BitrateKbps:     987,
 		DurationSeconds: 245.5,
@@ -400,8 +401,59 @@ func TestFileMetadataEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Codec != "FLAC" || metadata.BitrateKbps != 987 || metadata.DurationSeconds != 245.5 {
+	if metadata.Title != "Metadata Title" || metadata.Codec != "FLAC" || metadata.BitrateKbps != 987 || metadata.DurationSeconds != 245.5 {
 		t.Fatalf("unexpected metadata: %+v", metadata)
+	}
+}
+
+func TestMetadataAndEmbeddedCoverShareOneProbe(t *testing.T) {
+	probeDir := t.TempDir()
+	countPath := filepath.Join(probeDir, "count")
+	script := `#!/bin/sh
+printf '1\n' >> "$SHUFFLEMUSE_TEST_FFPROBE_COUNT"
+cat <<'JSON'
+{"streams":[{"codec_type":"audio","codec_name":"flac","duration":"12","bit_rate":"1000000"},{"codec_type":"video","codec_name":"mjpeg","width":640,"height":640}],"format":{"duration":"12","bit_rate":"1000000","tags":{"TITLE":"Shared Title"}}}
+JSON
+`
+	if err := os.WriteFile(filepath.Join(probeDir, "ffprobe"), []byte(script), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("SHUFFLEMUSE_TEST_FFPROBE_COUNT", countPath)
+	t.Setenv("PATH", probeDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	env := setupTestEnv(t)
+	defer env.teardown()
+	id := env.idx.Files[0].ID
+
+	response, err := http.Get(env.server.URL + "/api/files/" + id + "/metadata")
+	if err != nil {
+		t.Fatal(err)
+	}
+	var metadata stream.Metadata
+	if err := json.NewDecoder(response.Body).Decode(&metadata); err != nil {
+		response.Body.Close()
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || metadata.Title != "Shared Title" {
+		t.Fatalf("metadata = %d/%+v", response.StatusCode, metadata)
+	}
+
+	response, err = http.Head(env.server.URL + "/api/files/" + id + "/cover")
+	if err != nil {
+		t.Fatal(err)
+	}
+	response.Body.Close()
+	if response.StatusCode != http.StatusOK || response.Header.Get("X-Cover-Source") != "embedded" {
+		t.Fatalf("cover = %d source=%q", response.StatusCode, response.Header.Get("X-Cover-Source"))
+	}
+
+	count, err := os.ReadFile(countPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if calls := bytes.Count(count, []byte{'\n'}); calls != 1 {
+		t.Fatalf("ffprobe calls = %d, log=%q", calls, count)
 	}
 }
 
@@ -571,10 +623,10 @@ func TestDirectoryCoverEndpointHEADConditionalAndStrictPath(t *testing.T) {
 	}
 }
 
-func TestSmallDirectoryPNGIsPreservedAndWinsBeforeEmbeddedProbe(t *testing.T) {
+func TestSmallFolderPNGIsPreservedAndWinsBeforeEmbeddedProbe(t *testing.T) {
 	env := setupTestEnv(t)
 	defer env.teardown()
-	imagePath := filepath.Join(env.api.Config.MusicDir, "artist1", "cover.png")
+	imagePath := filepath.Join(env.api.Config.MusicDir, "artist1", "Folder.PNG")
 	img := image.NewNRGBA(image.Rect(0, 0, 2, 2))
 	img.SetNRGBA(0, 0, color.NRGBA{R: 200, G: 40, B: 20, A: 80})
 	var encoded bytes.Buffer
@@ -601,7 +653,7 @@ func TestSmallDirectoryPNGIsPreservedAndWinsBeforeEmbeddedProbe(t *testing.T) {
 		if !bytes.Equal(body, encoded.Bytes()) || response.Header.Get("Content-Length") != fmt.Sprint(encoded.Len()) {
 			t.Fatalf("GET %s changed small PNG: length=%q body=%d", endpoint, response.Header.Get("Content-Length"), len(body))
 		}
-		if response.Header.Get("X-Cover-Source") != "cover.png" {
+		if response.Header.Get("X-Cover-Source") != "Folder.PNG" {
 			t.Fatalf("GET %s source = %q", endpoint, response.Header.Get("X-Cover-Source"))
 		}
 	}

@@ -18,6 +18,7 @@ import (
 	"time"
 
 	"github.com/ColderCoder/ShuffleMuse/internal/mediaexec"
+	"github.com/ColderCoder/ShuffleMuse/internal/stream"
 )
 
 func TestDirectoryCoverPreferenceAndEmbeddedFallbackOrder(t *testing.T) {
@@ -54,6 +55,38 @@ func TestDirectoryCoverPreferenceAndEmbeddedFallbackOrder(t *testing.T) {
 	if len(calls) != 2 || calls[0] != directoryDescriptor || calls[1] != embeddedDescriptor {
 		t.Fatalf("discovery order = %v", calls)
 	}
+}
+
+func TestDirectoryCoverPrefersCoverNamesBeforeFolderNames(t *testing.T) {
+	t.Run("folder JPEG before folder PNG", func(t *testing.T) {
+		dir := t.TempDir()
+		jpegPath := filepath.Join(dir, "Folder.JPG")
+		writePNG(t, filepath.Join(dir, "folder.png"), 8, 6, false)
+		writeJPEG(t, jpegPath, 8, 6)
+
+		descriptor, err := discoverDirectoryCover(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if descriptor.Source != "Folder.JPG" || descriptor.FilePath != jpegPath || descriptor.ContentType != "image/jpeg" {
+			t.Fatalf("folder JPEG preference = %+v", descriptor)
+		}
+	})
+
+	t.Run("cover basename before folder basename", func(t *testing.T) {
+		dir := t.TempDir()
+		coverPath := filepath.Join(dir, "cover.png")
+		writeJPEG(t, filepath.Join(dir, "folder.jpg"), 8, 6)
+		writePNG(t, coverPath, 8, 6, false)
+
+		descriptor, err := discoverDirectoryCover(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if descriptor.Source != "cover.png" || descriptor.FilePath != coverPath || descriptor.ContentType != "image/png" {
+			t.Fatalf("cover basename preference = %+v", descriptor)
+		}
+	})
 }
 
 func TestInvalidDirectoryCoverDoesNotProbeEmbedded(t *testing.T) {
@@ -321,7 +354,8 @@ func TestEmbeddedCoverFallsBackTo1024JPEG(t *testing.T) {
 		t.Fatalf("create embedded-cover fixture: %v: %s", err, output)
 	}
 
-	loader := NewLoader(nil)
+	metadataProbe := stream.NewMetadataProbe(nil)
+	loader := NewLoader(nil, Config{EmbeddedProbe: metadataProbe.ProbeEmbedded})
 	descriptor, err := loader.Describe(context.Background(), audioPath)
 	if err != nil {
 		t.Fatal(err)

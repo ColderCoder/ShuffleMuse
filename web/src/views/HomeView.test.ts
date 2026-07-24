@@ -42,6 +42,38 @@ describe('HomeView', () => {
     expect(wrapper.findAll('button').some(button => button.text().includes('Randomize'))).toBe(false)
   })
 
+  it('uses the metadata title for display while retaining the real file path', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const player = usePlayerStore()
+    player.currentTrack = {
+      id: 'one',
+      name: '01. filename.flac',
+      dir: 'Artist/Album',
+      filepath: 'Artist/Album/01. filename.flac',
+      streamUrl: '/api/stream/one',
+    }
+    player.mediaMetadata = {
+      title: 'Metadata Title',
+      codec: 'FLAC',
+      bitrateKbps: 1000,
+      bitrateApproximate: false,
+      durationSeconds: 180,
+    }
+
+    const wrapper = await mountHome(pinia)
+    expect(wrapper.get('.now-playing-track-name').text()).toBe('Metadata Title')
+    expect(wrapper.get('.now-playing-track-dir').text()).toBe('Artist/Album/01. filename.flac')
+    expect(wrapper.get('img.now-playing-cover').attributes('alt')).toBe('Cover art for Metadata Title')
+
+    player.mediaMetadata = {
+      ...player.mediaMetadata,
+      title: '   ',
+    }
+    await wrapper.vm.$nextTick()
+    expect(wrapper.get('.now-playing-track-name').text()).toBe('01. filename.flac')
+  })
+
   it('delays a low-priority directory cover, then falls back to the track and placeholder', async () => {
     vi.useFakeTimers()
     const pinia = createPinia()

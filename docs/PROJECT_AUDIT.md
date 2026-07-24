@@ -1,6 +1,6 @@
 # 项目审计
 
-审计日期：2026-07-23
+审计日期：2026-07-24
 
 审计对象：当前工作树，包括尚未提交的后端、前端、Compose 和测试变更。
 
@@ -19,6 +19,8 @@
 2026-07-22 的复核关闭了此前剩余的六项中优先级问题：配置语法现在 fail fast，启动分别预检 ffmpeg/ffprobe，状态接口下发实际 Opus 码率，Tags 键盘焦点可见，logout 网络失败不再传播，并且干净检出可以直接编译 Go embed。详细证据见下文。
 
 2026-07-23 的全项目逻辑与性能复核又关闭了八项问题：默认 Compose 实际暴露范围与文档重新一致；Tags 不再预取完整标签集合；Search/Browse/Preview/Rescan 的过期工作可取消；Browse 的任意深页码不再扩大内存上界；队列选曲不再持有全局锁完成线性扫描；静态哈希资源获得长期缓存且缺失 asset 不再回退 HTML；损坏的本地音量值会被安全归一化；favorite 筛选也不再夹带当前非收藏曲目。
+
+2026-07-24 的 `0.1.1` 发布复核进一步检查了自 `v0.1.0` 起的全部提交与工作树差异。metadata TITLE 与内嵌封面描述已合并为单次有界 ffprobe，目录封面加入 `folder.jpg`/`folder.png`，播放器中间宽度布局、底栏路径链接和 Playlist 接缝均通过自动化与隔离 Chromium 验证。默认及大陆 Dockerfile 的发布候选镜像均完成构建并正确注入 `0.1.1` 版本。
 
 ## 审计范围与方法
 
@@ -47,15 +49,14 @@
 | `go test -race -count=1 ./...` | 通过 | 覆盖当前 Go 测试触达的并发路径 |
 | `go vet ./...` | 通过 | 无 vet 报告 |
 | `go test -cover -count=1 ./internal/...` | 通过 | 包级覆盖率见下表 |
-| `cd web && bun run test:run` | 通过 | 17 个测试文件、61 个用例 |
+| `cd web && bun run test:run` | 通过 | 17 个测试文件、64 个用例 |
 | `cd web && bun run build` | 通过 | 包含 `vue-tsc -b` 与 Vite production build |
 | 三份 `docker compose ... config --quiet` | 通过 | GHCR、官方源码构建和大陆源码构建配置均能完成解析和插值 |
-| `docker compose build --no-cache` | 外部网络失败 | 官方 npm 冷安装与前端构建通过；`proxy.golang.org` 下载 bbolt module 时连接超时 |
-| `docker compose build --no-cache --build-arg GOPROXY=https://goproxy.cn,direct` | 外部网络未完成 | Go 下载、官方 npm 冷安装及前后端编译通过；官方 Alpine 仓库停在 FFmpeg 依赖 38/107，连续 3 分钟无进展后人工取消 |
+| 默认 Dockerfile 发布候选构建 | 通过 | 官方 Go proxy 首次连接超时；改用受支持的 `GOPROXY=https://goproxy.cn,direct` 参数后完成镜像、版本和 labels 检查 |
 | `docker compose -f docker-compose.build-cn.yml build --no-cache` | 通过 | DaoCloud、npmmirror、Goproxy.cn、`sum.golang.google.cn` 与阿里云 APK 镜像的完整无缓存构建通过 |
-| 默认 Dockerfile + `GOPROXY=https://goproxy.cn,direct` | 通过 | 完整构建、版本信息、OCI labels 与非 root 用户均已核对 |
+| 大陆 Dockerfile `0.1.1` 发布候选构建 | 通过 | 前后端构建、FFmpeg 安装、版本信息、OCI labels 与非 root 用户均已核对 |
 | 非 root 临时卷 tar 备份/恢复 smoke test | 通过 | 在只读根、`cap_drop ALL`、`no-new-privileges` 下完成跨卷 round trip，恢复文件属于 `shufflemuse` |
-| 隔离 Chromium 实机冒烟 | 通过 | favorite 只循环收藏曲目；音频请求早于延迟封面；同目录换曲复用 URL/DOM/请求；刷新后封面 `transferSize=0`；无 console/page error |
+| 隔离 Chromium 实机冒烟 | 通过 | 在 1240、1100、961/960、761/760 和 375 px 验证布局；TITLE、原始路径、Browse 链接及 Original/Opus 正常；无 console/page error |
 | `git diff --check` | 通过 | 当前 diff 无空白错误 |
 
 `internal` 包级语句覆盖率快照：
@@ -65,11 +66,11 @@
 | `internal/api` | 81.9% |
 | `internal/auth` | 92.2% |
 | `internal/config` | 84.3% |
-| `internal/cover` | 78.5% |
+| `internal/cover` | 79.1% |
 | `internal/index` | 76.0% |
 | `internal/mediaexec` | 78.2% |
 | `internal/playqueue` | 80.9% |
-| `internal/stream` | 84.7% |
+| `internal/stream` | 85.5% |
 | `internal/tags` | 76.9% |
 
 覆盖率只能说明哪些语句被执行，不能代替端到端行为验证。尤其是进程启动/关机、真实反向代理链、浏览器可访问性、Docker 网络和长期内存增长，不能从这些数字推导为安全。
@@ -288,8 +289,8 @@ E2E 优先覆盖登录失效、播放、Tags CSV、Graveyard 与 Modal 焦点。
 
 状态：2026-07-23 已修复
 
-Go module 已改为 `github.com/ColderCoder/ShuffleMuse`，前后端版本统一为
-`0.1.0`，构建注入 commit/build time 并提供 `shufflemuse --version`。
+Go module 已改为 `github.com/ColderCoder/ShuffleMuse`，前后端发布版本统一为
+`0.1.1`，构建注入 commit/build time 并提供 `shufflemuse --version`。
 仓库加入 MIT LICENSE、CHANGELOG、CONTRIBUTING、SECURITY policy、完整 CI
 和仅向 GHCR 发布 amd64/arm64 镜像的标签 workflow。`.dockerignore` 也排除
 本地二进制、测试产物和 TypeScript build info。

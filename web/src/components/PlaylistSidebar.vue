@@ -110,7 +110,7 @@ function playItem(index: number) {
 .playlist-list {
   flex: 1;
   overflow-y: auto;
-  padding: 0.25rem;
+  padding: 0 0.25rem 0.25rem;
 }
 
 .playlist-navigation {

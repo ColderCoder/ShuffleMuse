@@ -252,7 +252,7 @@ Tags 文件行播放按钮已覆盖 hover、按钮 `:focus-visible` 和行 `:foc
 
 ## 当前测试范围
 
-后端测试覆盖配置、认证、代理、严格请求、扫描、重扫、Browse、stream、media queue、tags、Graveyard、CSV 和静态资源缓存。前端当前有 17 个测试文件、60 个用例，覆盖主要 stores、分页/取消竞态、登录封禁、路由、Search 语义、Playlist 分块、Tags 二级导航与导出、Graveyard 和 Modal 焦点。
+后端测试覆盖配置、认证、代理、严格请求、扫描、重扫、Browse、stream、media queue、tags、Graveyard、CSV 和静态资源缓存。前端当前有 17 个测试文件、64 个用例，覆盖主要 stores、分页/取消竞态、登录封禁、路由、Search 语义、Playlist 分块、Tags 二级导航与导出、Graveyard、Modal 焦点和 metadata 标题切换。
 
 当前明确缺口：
 
@@ -268,7 +268,7 @@ Tags 文件行播放按钮已覆盖 hover、按钮 `:focus-visible` 和行 `:foc
 ## 依赖与项目元数据
 
 - Go module 为 `github.com/ColderCoder/ShuffleMuse`。
-- 前端和后端版本均为 `0.1.0`；容器构建通过 linker flags 注入版本、commit
+- 前端和后端发布版本均为 `0.1.1`；容器构建通过 linker flags 注入版本、commit
   和构建时间，`shufflemuse --version` 可直接读取。
 - 发布与治理入口包括 LICENSE、CHANGELOG、CONTRIBUTING、SECURITY policy、
   完整 CI 和仅 GHCR 的标签发布 workflow。

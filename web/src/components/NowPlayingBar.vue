@@ -27,6 +27,10 @@ const playbackDetails = computed(() => {
   const prefix = player.mediaMetadata.bitrateApproximate ? '~' : ''
   return `${player.mediaMetadata.codec} · ${prefix}${player.mediaMetadata.bitrateKbps} kbps`
 })
+const browseTarget = computed(() => {
+  const dir = player.currentTrack?.dir.replace(/\\/g, '/') ?? '.'
+  return dir === '.' ? { name: 'browse' } : { name: 'browse', query: { dir } }
+})
 
 watch(() => player.currentTime, value => {
   if (!seeking.value) seekPreview.value = value
@@ -136,10 +140,17 @@ async function toggleFavorite() {
       <span class="np-empty-hint">Choose a track or press Space</span>
     </div>
     <div v-else class="np-track-info" :class="{ 'np-track-info--error': player.error }">
-      <span class="np-track-name">{{ player.currentTrack?.name }}</span>
+      <span class="np-track-name">{{ player.displayTitle }}</span>
       <span class="np-track-meta">
         <span>{{ playbackDetails }}</span>
-        <span class="np-track-path">· {{ player.currentTrack?.filepath }}</span>
+        <router-link
+          class="np-track-path"
+          :to="browseTarget"
+          :title="`Browse folder: ${player.currentTrack?.dir}`"
+          :aria-label="`Browse folder containing ${player.displayTitle}`"
+        >
+          · {{ player.currentTrack?.filepath }}
+        </router-link>
         <span v-if="player.isBuffering" class="np-buffering">Buffering</span>
         <span v-else-if="player.error" class="np-error-text">{{ player.error }}</span>
         <span v-else-if="favoriteError" class="np-error-text">{{ favoriteError }}</span>
@@ -337,6 +348,16 @@ async function toggleFavorite() {
   font-size: 0.72rem;
 }
 
+.np-track-path {
+  color: inherit;
+}
+
+.np-track-path:hover {
+  color: var(--accent-hover);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+
 .np-buffering,
 .np-error-text {
   margin-left: 0.5rem;
@@ -476,6 +497,45 @@ async function toggleFavorite() {
 @media (max-width: 960px) {
   .now-playing-bar {
     right: 0;
+  }
+}
+
+@media (min-width: 961px) and (max-width: 1240px) {
+  .now-playing-bar {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+    column-gap: 0.5rem;
+    padding-right: 0.75rem;
+    padding-left: 0.75rem;
+  }
+
+  .np-controls {
+    grid-template-columns: 36px auto;
+    gap: 0.375rem;
+  }
+
+  .np-controls::after {
+    display: none;
+  }
+
+  .np-transport {
+    grid-column: 2;
+    gap: 0.25rem;
+  }
+
+  .np-right {
+    gap: 0.375rem;
+  }
+
+  .np-volume {
+    gap: 0.375rem;
+  }
+
+  .volume-slider {
+    width: clamp(48px, calc(100vw - 1000px), 80px);
+  }
+
+  .np-volume-pct {
+    display: none;
   }
 }
 

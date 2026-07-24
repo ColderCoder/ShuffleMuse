@@ -6,7 +6,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"image"
@@ -83,10 +82,11 @@ type Result struct {
 }
 
 type Config struct {
-	Entries     int
-	Bytes       int64
-	NegativeTTL time.Duration
-	TaskTimeout time.Duration
+	Entries       int
+	Bytes         int64
+	NegativeTTL   time.Duration
+	TaskTimeout   time.Duration
+	EmbeddedProbe func(context.Context, string) (width, height int, found bool, err error)
 }
 
 type descriptorKind uint8
@@ -148,6 +148,7 @@ type Loader struct {
 	negativeTTL   time.Duration
 	taskTimeout   time.Duration
 	executor      mediaexec.Executor
+	embeddedProbe func(context.Context, string) (width, height int, found bool, err error)
 	now           func() time.Time
 	discover      func(context.Context, descriptorKey) (Descriptor, error)
 	transcode     func(context.Context, Descriptor) ([]byte, error)
@@ -156,6 +157,7 @@ type Loader struct {
 func NewLoader(executor mediaexec.Executor, options ...Config) *Loader {
 	config := Config{Entries: 128, Bytes: 64 << 20, NegativeTTL: 30 * time.Second, TaskTimeout: 15 * time.Second}
 	if len(options) > 0 {
+		config.EmbeddedProbe = options[0].EmbeddedProbe
 		if options[0].Entries > 0 {
 			config.Entries = options[0].Entries
 		}
@@ -174,16 +176,16 @@ func NewLoader(executor mediaexec.Executor, options ...Config) *Loader {
 		describeCalls: make(map[descriptorKey]*descriptorFlight), renderCalls: make(map[string]*renderFlight),
 		maxEntries: config.Entries, maxBytes: config.Bytes,
 		negativeTTL: config.NegativeTTL, taskTimeout: config.TaskTimeout,
-		executor: executor, now: time.Now,
+		executor: executor, embeddedProbe: config.EmbeddedProbe, now: time.Now,
 	}
 	loader.discover = loader.discoverDescriptor
 	loader.transcode = loader.transcodeJPEG
 	return loader
 }
 
-// DescribeDirectory discovers only a cover.jpg or cover.png in directory. It
-// never probes audio files, so all tracks in the directory receive the same
-// descriptor and ETag.
+// DescribeDirectory discovers cover.jpg, cover.png, folder.jpg, or folder.png
+// in directory, in that order. It never probes audio files, so all tracks in
+// the directory receive the same descriptor and ETag.
 func (l *Loader) DescribeDirectory(ctx context.Context, directory string) (Descriptor, error) {
 	if err := ctx.Err(); err != nil {
 		return Descriptor{}, err
@@ -196,8 +198,8 @@ func (l *Loader) DescribeDirectory(ctx context.Context, directory string) (Descr
 	return l.describe(ctx, key)
 }
 
-// Describe gives an external directory cover priority. ffprobe is only used
-// when no eligible directory cover exists.
+// Describe gives an external directory cover priority. The shared media probe
+// is only consulted when no eligible directory cover exists.
 func (l *Loader) Describe(ctx context.Context, audioPath string) (Descriptor, error) {
 	if err := ctx.Err(); err != nil {
 		return Descriptor{}, err
@@ -463,38 +465,17 @@ func validateDimensions(width, height int) error {
 }
 
 func (l *Loader) discoverEmbedded(ctx context.Context, key descriptorKey) (Descriptor, error) {
-	task, err := mediaexec.Start(l.executor, ctx, mediaexec.AuxHigh)
+	if l.embeddedProbe == nil {
+		return Descriptor{}, ErrNotFound
+	}
+	width, height, found, err := l.embeddedProbe(ctx, key.path)
 	if err != nil {
 		return Descriptor{}, err
 	}
-	defer task.Done()
-	commandCtx, cancel := context.WithTimeout(task.Context(), l.taskTimeout)
-	defer cancel()
-	cmd := exec.CommandContext(commandCtx,
-		"ffprobe", "-v", "error", "-select_streams", "v:0",
-		"-show_entries", "stream=index,width,height", "-of", "json", key.path,
-	)
-	output, err := cmd.Output()
-	if err != nil {
-		if errors.Is(commandCtx.Err(), context.DeadlineExceeded) {
-			return Descriptor{}, fmt.Errorf("cover descriptor deadline: %w", mediaexec.ErrTaskTimeout)
-		}
-		if task.Context().Err() != nil {
-			return Descriptor{}, task.Context().Err()
-		}
+	if !found {
 		return Descriptor{}, ErrNotFound
 	}
-	var result struct {
-		Streams []struct {
-			Width  int `json:"width"`
-			Height int `json:"height"`
-		} `json:"streams"`
-	}
-	if err := json.Unmarshal(output, &result); err != nil || len(result.Streams) == 0 {
-		return Descriptor{}, ErrNotFound
-	}
-	stream := result.Streams[0]
-	if err := validateDimensions(stream.Width, stream.Height); err != nil {
+	if err := validateDimensions(width, height); err != nil {
 		return Descriptor{}, err
 	}
 	modTime := time.Unix(0, key.modUnixNano)
@@ -502,10 +483,10 @@ func (l *Loader) discoverEmbedded(ctx context.Context, key descriptorKey) (Descr
 		Kind: Embedded, ContentType: "image/jpeg", Name: "cover.jpg", Source: "embedded",
 		ModTime: modTime,
 		ETag: makeETag(
-			"embedded", key.path, key.size, key.modUnixNano, stream.Width, stream.Height,
+			"embedded", key.path, key.size, key.modUnixNano, width, height,
 			coverThresholdsSpec, coverEncodingSpec,
 		),
-		Width: stream.Width, Height: stream.Height, RequiresRender: true,
+		Width: width, Height: height, RequiresRender: true,
 		audioPath: key.path, audioSize: key.size, audioModNano: key.modUnixNano,
 	}, nil
 }
@@ -624,7 +605,7 @@ func findDirectoryCover(dir string) (string, os.FileInfo, error) {
 	if err != nil {
 		return "", nil, ErrNotFound
 	}
-	for _, candidate := range []string{"cover.jpg", "cover.png"} {
+	for _, candidate := range []string{"cover.jpg", "cover.png", "folder.jpg", "folder.png"} {
 		for _, entry := range entries {
 			if !strings.EqualFold(entry.Name(), candidate) || entry.Type()&os.ModeSymlink != 0 {
 				continue
