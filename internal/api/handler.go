@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"net/http"
 	"os"
@@ -227,6 +228,16 @@ type commitTrackingWriter struct {
 }
 
 func (w *commitTrackingWriter) Unwrap() http.ResponseWriter { return w.ResponseWriter }
+
+func (w *commitTrackingWriter) ReadFrom(r io.Reader) (int64, error) {
+	if !w.committed {
+		w.WriteHeader(http.StatusOK)
+	}
+	if readerFrom, ok := w.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(r)
+	}
+	return io.Copy(writerOnly{Writer: w}, r)
+}
 
 func (w *commitTrackingWriter) Flush() {
 	if !w.committed {
