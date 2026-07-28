@@ -106,7 +106,7 @@ watch(() => route.fullPath, async () => {
 })
 
 watch(() => auth.isLoggedIn, loggedIn => {
-  if (loggedIn) void library.start()
+  if (loggedIn) void library.start(auth.statusSnapshot ?? undefined)
   else library.stop()
 }, { immediate: true })
 

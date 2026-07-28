@@ -1,6 +1,7 @@
 package api
 
 import (
+	"io"
 	"log"
 	"net"
 	"net/http"
@@ -87,6 +88,13 @@ type loggingWriter struct {
 
 func (lw *loggingWriter) Unwrap() http.ResponseWriter { return lw.ResponseWriter }
 
+func (lw *loggingWriter) ReadFrom(r io.Reader) (int64, error) {
+	if readerFrom, ok := lw.ResponseWriter.(io.ReaderFrom); ok {
+		return readerFrom.ReadFrom(r)
+	}
+	return io.Copy(writerOnly{Writer: lw}, r)
+}
+
 func (lw *loggingWriter) Flush() {
 	if flusher, ok := lw.ResponseWriter.(http.Flusher); ok {
 		flusher.Flush()
@@ -96,4 +104,10 @@ func (lw *loggingWriter) Flush() {
 func (lw *loggingWriter) WriteHeader(code int) {
 	lw.statusCode = code
 	lw.ResponseWriter.WriteHeader(code)
+}
+
+// writerOnly hides optional interfaces such as io.ReaderFrom so fallback copies
+// cannot recurse back into a response writer's ReadFrom method.
+type writerOnly struct {
+	io.Writer
 }

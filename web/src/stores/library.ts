@@ -3,7 +3,8 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 import * as api from '../api'
 
-const STATUS_POLL_MS = 2000
+const ACTIVE_STATUS_POLL_MS = 2000
+const IDLE_STATUS_POLL_MS = 30000
 
 export const useLibraryStore = defineStore('library', () => {
   const status = ref<api.Status | null>(null)
@@ -23,12 +24,34 @@ export const useLibraryStore = defineStore('library', () => {
   const scanActive = computed(() => scanStatus.value === 'initializing' || scanStatus.value === 'scanning')
   const canRescan = computed(() => !loading.value && !scanActive.value)
 
+  function pageIsHidden() {
+    return typeof document !== 'undefined' && document.visibilityState === 'hidden'
+  }
+
+  function clearPollTimer() {
+    if (pollTimer) clearTimeout(pollTimer)
+    pollTimer = null
+  }
+
   function schedulePoll() {
-    if (!running || pollTimer) return
+    if (!running || loading.value || pollTimer || pageIsHidden()) return
+    const delay = scanActive.value ? ACTIVE_STATUS_POLL_MS : IDLE_STATUS_POLL_MS
     pollTimer = setTimeout(() => {
       pollTimer = null
-      void refreshStatus().finally(schedulePoll)
-    }, STATUS_POLL_MS)
+      const epoch = lifecycleEpoch
+      void refreshStatus().finally(() => {
+        if (epoch === lifecycleEpoch) schedulePoll()
+      })
+    }, delay)
+  }
+
+  function handleVisibilityChange() {
+    clearPollTimer()
+    if (!running || pageIsHidden()) return
+    const epoch = lifecycleEpoch
+    void refreshStatus().finally(() => {
+      if (epoch === lifecycleEpoch) schedulePoll()
+    })
   }
 
   async function refreshStatus() {
@@ -57,18 +80,36 @@ export const useLibraryStore = defineStore('library', () => {
     return request.promise
   }
 
-  async function start() {
-    if (running) return refreshStatus()
+  async function start(initialStatus?: api.Status) {
+    if (running) {
+      if (initialStatus && !status.value) {
+        status.value = initialStatus
+        statusError.value = null
+      }
+      await statusRequest?.promise
+      return
+    }
     running = true
-    await refreshStatus()
-    schedulePoll()
+    const epoch = lifecycleEpoch
+    if (typeof document !== 'undefined') {
+      document.addEventListener('visibilitychange', handleVisibilityChange)
+    }
+    if (initialStatus) {
+      status.value = initialStatus
+      statusError.value = null
+    } else if (!pageIsHidden()) {
+      await refreshStatus()
+    }
+    if (epoch === lifecycleEpoch) schedulePoll()
   }
 
   function stop() {
     running = false
     lifecycleEpoch += 1
-    if (pollTimer) clearTimeout(pollTimer)
-    pollTimer = null
+    clearPollTimer()
+    if (typeof document !== 'undefined') {
+      document.removeEventListener('visibilitychange', handleVisibilityChange)
+    }
     statusRequest?.controller.abort()
     statusRequest = null
     rescanController?.abort()
@@ -81,6 +122,7 @@ export const useLibraryStore = defineStore('library', () => {
 
   async function requestRescan() {
     if (!canRescan.value) return
+    clearPollTimer()
     const epoch = lifecycleEpoch
     const controller = new AbortController()
     rescanController = controller
@@ -88,6 +130,9 @@ export const useLibraryStore = defineStore('library', () => {
     rescanError.value = null
     try {
       await api.rescan(controller.signal)
+      if (epoch !== lifecycleEpoch) return
+      const pendingStatus = statusRequest?.epoch === epoch ? statusRequest.promise : null
+      if (pendingStatus) await pendingStatus
       if (epoch !== lifecycleEpoch) return
       if (status.value) {
         status.value = {
@@ -97,7 +142,6 @@ export const useLibraryStore = defineStore('library', () => {
         }
       }
       await refreshStatus()
-      if (epoch === lifecycleEpoch) schedulePoll()
     } catch (error) {
       if (epoch !== lifecycleEpoch || axios.isCancel(error)) return
       if (axios.isAxiosError(error)) {
@@ -108,7 +152,10 @@ export const useLibraryStore = defineStore('library', () => {
       }
     } finally {
       if (rescanController === controller) rescanController = null
-      if (epoch === lifecycleEpoch) loading.value = false
+      if (epoch === lifecycleEpoch) {
+        loading.value = false
+        schedulePoll()
+      }
     }
   }
 
