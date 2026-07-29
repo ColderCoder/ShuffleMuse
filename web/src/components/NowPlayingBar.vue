@@ -500,7 +500,7 @@ async function toggleFavorite() {
   }
 }
 
-@media (min-width: 961px) and (max-width: 1240px) {
+@media (min-width: 761px) and (max-width: 1360px) {
   .now-playing-bar {
     grid-template-columns: minmax(0, 1fr) auto auto;
     column-gap: 0.5rem;
