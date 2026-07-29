@@ -278,11 +278,28 @@ HTTP/1.1 202 Accepted
 
 文件已经在队列中时返回原队列、零基 `queueIndex`、所在页及该页。文件在线但不在队列中时，原子创建以该文件为首、保留原剩余顺序的替代队列，并在响应的 `queue.id` 返回新令牌。
 
+### `POST /api/queues/{id}/prepend-directory`
+
+```json
+{"dir":"Artist/Album"}
+```
+
+读取目录中直接包含的在线音频文件（不递归），按不区分大小写的文件名
+排序，移到当前队列最前并去重。原队列的其他项目保持原顺序。成功后原子
+替换队列令牌并返回 `200 OK`；响应包含新队列的第一页以及
+`directoryTrackCount`。
+
+目录及 symlink 解析后的目标都必须位于 `MUSIC_DIR` 内。空目录或没有在线
+音频的目录返回 `422 NO_AUDIO_FILES`；不存在的目录返回
+`404 NOT_FOUND`。
+
 ### `DELETE /api/queues/{id}`
 
 幂等返回 `204 No Content`，令牌不存在或格式无效也相同。
 
-队列稳定错误：`404 QUEUE_NOT_FOUND`、`404 FILE_NOT_FOUND`、`503 QUEUE_BUSY`、`503 QUEUE_CAPACITY`。JSON、分页、认证和内部错误沿用公共错误码。
+队列稳定错误：`404 QUEUE_NOT_FOUND`、`404 FILE_NOT_FOUND`、
+`422 NO_AUDIO_FILES`、`503 QUEUE_BUSY`、`503 QUEUE_CAPACITY`。JSON、
+分页、认证和内部错误沿用公共错误码。
 
 ### `GET /api/search?q=<term>`
 
@@ -363,11 +380,15 @@ HEAD 和能得到 304 的条件请求只发现 descriptor，不启动 FFmpeg。�
       "playable":false
     }
   ],
+  "audioCount":0,
   "total":2,
   "page":1,
   "generation":3
 }
 ```
+
+`audioCount` 是该目录全部直接子项中当前可播放的音频文件数，不受当前
+分页影响；子目录中的音频不计入。
 
 音频文件还包含 `playable:true`、`audioId` 和不含扩展名的 `trackName`。
 
