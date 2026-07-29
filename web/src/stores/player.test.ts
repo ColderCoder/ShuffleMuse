@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 import { usePlayerStore } from './player'
 import * as api from '../api'
@@ -7,6 +7,7 @@ vi.mock('../api', () => ({
   createQueue: vi.fn(),
   getQueuePage: vi.fn(),
   selectQueueItem: vi.fn(),
+  prependQueueDirectory: vi.fn(),
   deleteQueue: vi.fn(),
   getFileMetadata: vi.fn(),
   getFiles: vi.fn(),
@@ -21,6 +22,7 @@ class FakeAudio extends EventTarget {
   currentTime = 0
   duration = 240
   readyState = 1
+  playCalls = 0
 
   constructor() {
     super()
@@ -33,6 +35,7 @@ class FakeAudio extends EventTarget {
   }
 
   async play() {
+    this.playCalls += 1
     this.paused = false
     this.dispatchEvent(new Event('playing'))
   }
@@ -45,6 +48,97 @@ class FakeAudio extends EventTarget {
   removeAttribute(name: string) {
     if (name === 'src') this.src = ''
   }
+}
+
+class FakeConstantSource {
+  offset = { value: 1 }
+  startCalls = 0
+  stopCalls = 0
+  connectCalls = 0
+  disconnectCalls = 0
+
+  connect() {
+    this.connectCalls += 1
+  }
+
+  disconnect() {
+    this.disconnectCalls += 1
+  }
+
+  start() {
+    this.startCalls += 1
+  }
+
+  stop() {
+    this.stopCalls += 1
+  }
+}
+
+class FakeGain {
+  gain = { value: 1 }
+  connectCalls = 0
+  disconnectCalls = 0
+
+  connect() {
+    this.connectCalls += 1
+  }
+
+  disconnect() {
+    this.disconnectCalls += 1
+  }
+}
+
+class FakeAudioContext {
+  static instances: FakeAudioContext[] = []
+  static rejectResume = false
+  static failConstruction = false
+
+  state: AudioContextState = 'suspended'
+  destination = {}
+  source = new FakeConstantSource()
+  gain = new FakeGain()
+  resumeCalls = 0
+  suspendCalls = 0
+  closeCalls = 0
+
+  constructor() {
+    if (FakeAudioContext.failConstruction) throw new Error('context unavailable')
+    FakeAudioContext.instances.push(this)
+  }
+
+  createConstantSource() {
+    return this.source
+  }
+
+  createGain() {
+    return this.gain
+  }
+
+  async resume() {
+    this.resumeCalls += 1
+    if (FakeAudioContext.rejectResume) throw new Error('resume rejected')
+    this.state = 'running'
+  }
+
+  async suspend() {
+    this.suspendCalls += 1
+    this.state = 'suspended'
+  }
+
+  async close() {
+    this.closeCalls += 1
+    this.state = 'closed'
+  }
+
+  static reset() {
+    FakeAudioContext.instances = []
+    FakeAudioContext.rejectResume = false
+    FakeAudioContext.failConstruction = false
+  }
+}
+
+function enableWebAudio() {
+  vi.stubGlobal('AudioContext', FakeAudioContext)
 }
 
 function item(index: number, id = `track-${index}`): api.QueueItem {
@@ -89,6 +183,9 @@ describe('player store server queues', () => {
     vi.clearAllMocks()
     localStorage.clear()
     FakeAudio.instances = []
+    FakeAudioContext.reset()
+    vi.stubGlobal('AudioContext', undefined)
+    vi.stubGlobal('webkitAudioContext', undefined)
     vi.stubGlobal('Audio', FakeAudio)
     setActivePinia(createPinia())
     vi.mocked(api.createQueue).mockResolvedValue(page())
@@ -99,6 +196,11 @@ describe('player store server queues', () => {
       durationSeconds: 240,
     })
     vi.mocked(api.deleteQueue).mockResolvedValue(undefined)
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
+    vi.unstubAllGlobals()
   })
 
   it('sanitizes corrupt and out-of-range stored volume before creating audio', () => {
@@ -195,6 +297,182 @@ describe('player store server queues', () => {
 
     await player.togglePlay()
     expect(player.isPlaying).toBe(true)
+  })
+
+  it('warms a cold audio endpoint for 1.5 seconds before starting media', async () => {
+    vi.useFakeTimers()
+    enableWebAudio()
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+
+    const playback = player.playAt(0)
+    await vi.advanceTimersByTimeAsync(0)
+    const audio = FakeAudio.instances[0]
+    expect(FakeAudioContext.instances).toHaveLength(1)
+    expect(audio.src).toContain('/api/stream/one')
+    expect(audio.playCalls).toBe(0)
+    expect(player.isBuffering).toBe(true)
+
+    await vi.advanceTimersByTimeAsync(1499)
+    expect(audio.playCalls).toBe(0)
+    await vi.advanceTimersByTimeAsync(1)
+    await playback
+
+    expect(audio.playCalls).toBe(1)
+    expect(player.isPlaying).toBe(true)
+    expect(player.isBuffering).toBe(false)
+    player.reset()
+  })
+
+  it('reuses a warm endpoint for track changes, mode changes, and Opus seeks', async () => {
+    vi.useFakeTimers()
+    enableWebAudio()
+    vi.mocked(api.createQueue).mockResolvedValue(page(
+      'two-tracks', 1, 2, [item(0, 'one'), item(1, 'two')],
+    ))
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+
+    const first = player.playAt(0)
+    await vi.advanceTimersByTimeAsync(1500)
+    await first
+    const context = FakeAudioContext.instances[0]
+    const audio = FakeAudio.instances[0]
+
+    await player.playAt(1)
+    await player.setStreamMode('opus')
+    await player.seek(45)
+
+    expect(player.currentTrack?.id).toBe('two')
+    expect(audio.src).toContain('mode=opus')
+    expect(audio.src).toContain('start=45.000')
+    expect(audio.playCalls).toBe(4)
+    expect(FakeAudioContext.instances).toHaveLength(1)
+    expect(context.resumeCalls).toBe(1)
+    expect(context.source.startCalls).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+    player.reset()
+  })
+
+  it('keeps the endpoint warm for 15 seconds after pause, then warms it again', async () => {
+    vi.useFakeTimers()
+    enableWebAudio()
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+    const first = player.playAt(0)
+    await vi.advanceTimersByTimeAsync(1500)
+    await first
+    const context = FakeAudioContext.instances[0]
+    const audio = FakeAudio.instances[0]
+
+    player.pause()
+    await vi.advanceTimersByTimeAsync(14999)
+    await player.resume()
+    expect(audio.playCalls).toBe(2)
+    expect(context.suspendCalls).toBe(0)
+
+    player.pause()
+    await vi.advanceTimersByTimeAsync(15000)
+    expect(context.suspendCalls).toBe(1)
+    expect(context.state).toBe('suspended')
+
+    const resumed = player.resume()
+    await vi.advanceTimersByTimeAsync(1499)
+    expect(audio.playCalls).toBe(2)
+    await vi.advanceTimersByTimeAsync(1)
+    await resumed
+    expect(audio.playCalls).toBe(3)
+    expect(context.resumeCalls).toBe(2)
+    player.reset()
+  })
+
+  it('lets pause cancel media playback while the endpoint is warming', async () => {
+    vi.useFakeTimers()
+    enableWebAudio()
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+
+    const playback = player.playAt(0)
+    await vi.advanceTimersByTimeAsync(500)
+    expect(player.isBuffering).toBe(true)
+    await player.togglePlay()
+    expect(player.isBuffering).toBe(false)
+
+    await vi.advanceTimersByTimeAsync(1000)
+    await playback
+    expect(FakeAudio.instances[0].playCalls).toBe(0)
+    expect(player.isPlaying).toBe(false)
+    player.reset()
+  })
+
+  it('only starts the latest track selected during endpoint warmup', async () => {
+    vi.useFakeTimers()
+    enableWebAudio()
+    vi.mocked(api.createQueue).mockResolvedValue(page(
+      'two-tracks', 1, 2, [item(0, 'one'), item(1, 'two')],
+    ))
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+
+    const first = player.playAt(0)
+    await vi.advanceTimersByTimeAsync(500)
+    const second = player.playAt(1)
+    await vi.advanceTimersByTimeAsync(1000)
+    await Promise.all([first, second])
+
+    const audio = FakeAudio.instances[0]
+    expect(player.currentTrack?.id).toBe('two')
+    expect(audio.src).toContain('/api/stream/two')
+    expect(audio.playCalls).toBe(1)
+    expect(FakeAudioContext.instances).toHaveLength(1)
+    player.reset()
+  })
+
+  it('cancels warmup playback and releases endpoint resources on reset', async () => {
+    vi.useFakeTimers()
+    enableWebAudio()
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+
+    const playback = player.playAt(0)
+    await vi.advanceTimersByTimeAsync(0)
+    const context = FakeAudioContext.instances[0]
+    const audio = FakeAudio.instances[0]
+    player.pause()
+    player.pause()
+    expect(vi.getTimerCount()).toBe(2)
+
+    player.reset()
+    expect(context.source.stopCalls).toBe(1)
+    expect(context.source.disconnectCalls).toBe(1)
+    expect(context.gain.disconnectCalls).toBe(1)
+    expect(context.closeCalls).toBe(1)
+    expect(vi.getTimerCount()).toBe(0)
+
+    await vi.advanceTimersByTimeAsync(1500)
+    await playback
+    expect(audio.playCalls).toBe(0)
+  })
+
+  it('falls back immediately when Web Audio is unsupported or cannot start', async () => {
+    const unsupported = usePlayerStore()
+    await unsupported.preparePlaylist()
+    await unsupported.playAt(0)
+    expect(FakeAudio.instances[0].playCalls).toBe(1)
+    unsupported.reset()
+
+    setActivePinia(createPinia())
+    enableWebAudio()
+    FakeAudioContext.rejectResume = true
+    const rejected = usePlayerStore()
+    await rejected.preparePlaylist()
+    await rejected.playAt(0)
+
+    expect(FakeAudio.instances[1].playCalls).toBe(1)
+    expect(FakeAudioContext.instances).toHaveLength(1)
+    expect(FakeAudioContext.instances[0].closeCalls).toBe(1)
+    expect(rejected.isPlaying).toBe(true)
+    rejected.reset()
   })
 
   it('ignores a stale aborted queue creation', async () => {
@@ -316,6 +594,91 @@ describe('player store server queues', () => {
     expect(player.queue?.id).toBe('queue-1')
     expect(player.currentTrack?.id).toBe('one')
     expect(player.playlistError).toBe('Failed to prepare playlist')
+  })
+
+  it('moves a directory to the queue front and immediately plays its first track', async () => {
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+    player.selectedTag = 'focus'
+    vi.mocked(api.prependQueueDirectory).mockResolvedValueOnce({
+      ...page('folder-queue', 1, 3, [
+        item(0, 'folder-a'),
+        item(1, 'folder-b'),
+        item(2, 'one'),
+      ]),
+      queue: {
+        id: 'folder-queue',
+        tag: 'focus',
+        createdGeneration: 1,
+        total: 3,
+        pageSize: 200,
+      },
+      directoryTrackCount: 2,
+    })
+
+    const count = await player.prependDirectory('Album')
+
+    expect(api.prependQueueDirectory).toHaveBeenCalledWith('queue-1', 'Album', expect.any(AbortSignal))
+    expect(count).toBe(2)
+    expect(player.queue?.id).toBe('folder-queue')
+    expect(player.selectedTag).toBe('focus')
+    expect(player.activeIndex).toBe(0)
+    expect(player.sidebarPage).toBe(1)
+    expect(player.currentTrack?.id).toBe('folder-a')
+    expect(player.currentTime).toBe(0)
+    expect(player.isPlaying).toBe(true)
+    expect(FakeAudio.instances[0].src).toContain('/api/stream/folder-a')
+  })
+
+  it('rebuilds an expired queue once before prepending the directory', async () => {
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+    player.selectedTag = 'focus'
+    vi.mocked(api.prependQueueDirectory)
+      .mockRejectedValueOnce(Object.assign(new Error('expired'), {
+        isAxiosError: true,
+        response: { data: { code: 'QUEUE_NOT_FOUND' } },
+      }))
+      .mockResolvedValueOnce({
+        ...page('folder-queue', 1, 2, [item(0, 'folder-a'), item(1, 'tagged')]),
+        queue: {
+          id: 'folder-queue',
+          tag: 'focus',
+          createdGeneration: 1,
+          total: 2,
+          pageSize: 200,
+        },
+        directoryTrackCount: 1,
+      })
+    vi.mocked(api.createQueue).mockResolvedValueOnce(page(
+      'recovered-base', 1, 1, [item(0, 'tagged')],
+    ))
+
+    const count = await player.prependDirectory('Album')
+
+    expect(api.createQueue).toHaveBeenLastCalledWith({ tag: 'focus' }, expect.any(AbortSignal))
+    expect(api.prependQueueDirectory).toHaveBeenNthCalledWith(
+      2, 'recovered-base', 'Album', expect.any(AbortSignal),
+    )
+    expect(count).toBe(1)
+    expect(player.currentTrack?.id).toBe('folder-a')
+  })
+
+  it('keeps the current queue and track when directory prepending fails', async () => {
+    const player = usePlayerStore()
+    await player.preparePlaylist()
+    await player.playAt(0)
+    const audio = FakeAudio.instances[0]
+    const source = audio.src
+    vi.mocked(api.prependQueueDirectory).mockRejectedValueOnce(new Error('busy'))
+
+    await expect(player.prependDirectory('Album')).rejects.toThrow('busy')
+
+    expect(player.queue?.id).toBe('queue-1')
+    expect(player.currentTrack?.id).toBe('one')
+    expect(player.isPlaying).toBe(true)
+    expect(audio.src).toBe(source)
+    expect(player.playlistLoading).toBe(false)
   })
 
   it('creates a new independent queue after the last track ends', async () => {

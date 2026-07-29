@@ -7,6 +7,8 @@ const STORAGE_KEY_VOLUME = 'shufflemuse-volume'
 const STORAGE_KEY_MUTED = 'shufflemuse-muted'
 const STORAGE_KEY_STREAM_MODE = 'shufflemuse-stream-mode'
 const MAX_CACHED_PAGES = 5
+const ENDPOINT_WARMUP_MS = 1500
+const ENDPOINT_KEEPALIVE_MS = 15000
 
 export type StreamMode = 'original' | 'opus'
 
@@ -21,6 +23,11 @@ export interface CurrentTrack {
 interface CachedPage {
   items: api.QueueItem[]
   libraryGeneration: number
+}
+
+interface PlaybackIntent {
+  id: number
+  endpointReady: Promise<void>
 }
 
 function loadVolume(): number {
@@ -90,10 +97,23 @@ export const usePlayerStore = defineStore('player', () => {
 
   let audio: HTMLAudioElement | null = null
   let playEpoch = 0
+  let playbackIntent = 0
+  let activeMediaPlaybackIntent = 0
+  let pendingMediaPlaybackIntent = 0
   let sourceRequest = 0
   let sourceOffset = 0
   let loadedTrackID: string | null = null
   let loadedMode: StreamMode | null = null
+  let endpointContext: AudioContext | null = null
+  let endpointSource: ConstantSourceNode | null = null
+  let endpointGain: GainNode | null = null
+  let endpointWarm = false
+  let endpointDisabled = false
+  let endpointGeneration = 0
+  let endpointWarmupTimer: ReturnType<typeof setTimeout> | null = null
+  let endpointWarmupPromise: Promise<void> | null = null
+  let resolveEndpointWarmup: (() => void) | null = null
+  let endpointSuspendTimer: ReturnType<typeof setTimeout> | null = null
   let queueController: AbortController | null = null
   let selectController: AbortController | null = null
   let metadataController: AbortController | null = null
@@ -113,6 +133,190 @@ export const usePlayerStore = defineStore('player', () => {
   const playlist = computed(() => sidebarItems.value)
   const cachedPageCount = computed(() => pages.value.size)
 
+  function clearEndpointSuspendTimer() {
+    if (endpointSuspendTimer === null) return
+    clearTimeout(endpointSuspendTimer)
+    endpointSuspendTimer = null
+  }
+
+  function settleEndpointWarmup() {
+    if (endpointWarmupTimer !== null) {
+      clearTimeout(endpointWarmupTimer)
+      endpointWarmupTimer = null
+    }
+    const resolve = resolveEndpointWarmup
+    resolveEndpointWarmup = null
+    endpointWarmupPromise = null
+    resolve?.()
+  }
+
+  function closeEndpoint(disable: boolean) {
+    endpointGeneration += 1
+    clearEndpointSuspendTimer()
+    settleEndpointWarmup()
+
+    const context = endpointContext
+    const source = endpointSource
+    const gain = endpointGain
+    endpointContext = null
+    endpointSource = null
+    endpointGain = null
+    endpointWarm = false
+    endpointDisabled = disable
+
+    try { source?.stop() } catch { /* already stopped */ }
+    try { source?.disconnect() } catch { /* already disconnected */ }
+    try { gain?.disconnect() } catch { /* already disconnected */ }
+    if (context && context.state !== 'closed') {
+      try { void context.close().catch(() => {}) } catch { /* already closed */ }
+    }
+  }
+
+  function createEndpointContext(): AudioContext | null {
+    const scope = globalThis as unknown as {
+      AudioContext?: new () => AudioContext
+      webkitAudioContext?: new () => AudioContext
+    }
+    const AudioContextConstructor = scope.AudioContext ?? scope.webkitAudioContext
+    if (!AudioContextConstructor) {
+      endpointDisabled = true
+      return null
+    }
+
+    let context: AudioContext | null = null
+    let source: ConstantSourceNode | null = null
+    let gain: GainNode | null = null
+    try {
+      context = new AudioContextConstructor()
+      source = context.createConstantSource()
+      gain = context.createGain()
+      source.offset.value = 0
+      gain.gain.value = 0
+      source.connect(gain)
+      gain.connect(context.destination)
+      source.start()
+      endpointContext = context
+      endpointSource = source
+      endpointGain = gain
+      return context
+    } catch {
+      try { source?.stop() } catch { /* not started */ }
+      try { source?.disconnect() } catch { /* not connected */ }
+      try { gain?.disconnect() } catch { /* not connected */ }
+      if (context && context.state !== 'closed') {
+        try { void context.close().catch(() => {}) } catch { /* ignore */ }
+      }
+      endpointDisabled = true
+      return null
+    }
+  }
+
+  function warmEndpoint(): Promise<void> {
+    endpointGeneration += 1
+    clearEndpointSuspendTimer()
+    if (endpointDisabled) return Promise.resolve()
+    if (endpointWarmupPromise) return endpointWarmupPromise
+
+    if (endpointContext?.state === 'closed') closeEndpoint(false)
+    if (endpointContext && endpointWarm && endpointContext.state === 'running') {
+      return Promise.resolve()
+    }
+
+    const context = endpointContext ?? createEndpointContext()
+    if (!context) return Promise.resolve()
+    endpointWarm = false
+
+    endpointWarmupPromise = new Promise<void>(resolve => {
+      resolveEndpointWarmup = resolve
+    })
+    const ready = endpointWarmupPromise
+    endpointWarmupTimer = setTimeout(() => {
+      if (endpointContext === context) endpointWarm = context.state === 'running'
+      settleEndpointWarmup()
+    }, ENDPOINT_WARMUP_MS)
+
+    let resumed: Promise<void>
+    try {
+      resumed = context.state === 'running' ? Promise.resolve() : context.resume()
+    } catch {
+      closeEndpoint(true)
+      return ready
+    }
+    void resumed.then(
+      () => {
+        if (endpointContext === context && endpointWarmupPromise === null) {
+          endpointWarm = context.state === 'running'
+        }
+      },
+      () => {
+        if (endpointContext === context) closeEndpoint(true)
+      },
+    )
+    return ready
+  }
+
+  function scheduleEndpointSuspend() {
+    clearEndpointSuspendTimer()
+    const context = endpointContext
+    if (!context || context.state === 'closed') return
+    const generation = ++endpointGeneration
+    endpointSuspendTimer = setTimeout(() => {
+      endpointSuspendTimer = null
+      if (endpointContext !== context || endpointGeneration !== generation) return
+      endpointWarm = false
+      try {
+        void context.suspend().then(
+          () => {
+            if (endpointContext !== context || endpointGeneration === generation) return
+            try {
+              void context.resume().then(() => {
+                if (endpointContext === context && endpointWarmupPromise === null) {
+                  endpointWarm = context.state === 'running'
+                }
+              }, () => {})
+            } catch { /* playback still falls back after the warmup deadline */ }
+          },
+          () => {
+            if (endpointContext === context && endpointGeneration === generation) {
+              endpointWarm = context.state === 'running'
+            }
+          },
+        )
+      } catch {
+        endpointWarm = context.state === 'running'
+      }
+    }, ENDPOINT_KEEPALIVE_MS)
+  }
+
+  function beginPlaybackIntent(): PlaybackIntent {
+    const id = ++playbackIntent
+    if (audio && !audio.paused && isPlaying.value) {
+      activeMediaPlaybackIntent = id
+    } else if (!isPlaying.value) {
+      pendingMediaPlaybackIntent = id
+      isBuffering.value = true
+    }
+    return { id, endpointReady: warmEndpoint() }
+  }
+
+  function isCurrentPlaybackIntent(intent: PlaybackIntent): boolean {
+    return intent.id === playbackIntent
+  }
+
+  function clearPendingPlayback(intent: PlaybackIntent) {
+    if (pendingMediaPlaybackIntent !== intent.id) return
+    pendingMediaPlaybackIntent = 0
+    if (!isPlaying.value) isBuffering.value = false
+  }
+
+  function abandonPlayback(intent: PlaybackIntent | null) {
+    if (!intent || !isCurrentPlaybackIntent(intent)) return
+    playbackIntent += 1
+    activeMediaPlaybackIntent = audio && !audio.paused && isPlaying.value ? playbackIntent : 0
+    clearPendingPlayback(intent)
+    if (!isPlaying.value) scheduleEndpointSuspend()
+  }
+
   function apiQueuePageSize(): number {
     return queue.value?.pageSize ?? 200
   }
@@ -131,6 +335,9 @@ export const usePlayerStore = defineStore('player', () => {
         void next()
       })
       audio.addEventListener('playing', () => {
+        if (activeMediaPlaybackIntent !== playbackIntent || audio?.paused) return
+        clearEndpointSuspendTimer()
+        pendingMediaPlaybackIntent = 0
         isBuffering.value = false
         isPlaying.value = true
       })
@@ -141,8 +348,12 @@ export const usePlayerStore = defineStore('player', () => {
       audio.addEventListener('waiting', () => {
         if (!audio?.paused) isBuffering.value = true
       })
-      audio.addEventListener('canplay', () => { isBuffering.value = false })
-      audio.addEventListener('seeked', () => { isBuffering.value = false })
+      audio.addEventListener('canplay', () => {
+        if (pendingMediaPlaybackIntent !== playbackIntent) isBuffering.value = false
+      })
+      audio.addEventListener('seeked', () => {
+        if (pendingMediaPlaybackIntent !== playbackIntent) isBuffering.value = false
+      })
       audio.addEventListener('timeupdate', () => {
         if (!audio) return
         const absoluteTime = sourceOffset + audio.currentTime
@@ -155,9 +366,11 @@ export const usePlayerStore = defineStore('player', () => {
         if (Number.isFinite(audio.duration) && audio.duration > 0) duration.value = audio.duration
       })
       audio.addEventListener('error', () => {
+        pendingMediaPlaybackIntent = 0
         error.value = 'Playback error'
         isBuffering.value = false
         isPlaying.value = false
+        scheduleEndpointSuspend()
       })
     }
     return audio
@@ -274,8 +487,15 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
-  async function loadCurrentSource(position: number, autoplay: boolean) {
+  async function loadCurrentSource(
+    position: number,
+    autoplay: boolean,
+    suppliedIntent: PlaybackIntent | null = null,
+  ) {
     if (!currentTrack.value) return
+    const intent = autoplay ? suppliedIntent ?? beginPlaybackIntent() : null
+    if (intent && !isCurrentPlaybackIntent(intent)) return
+    const epoch = playEpoch
     const trackID = currentTrack.value.id
     const mode = streamMode.value
     const requestID = ++sourceRequest
@@ -289,6 +509,7 @@ export const usePlayerStore = defineStore('player', () => {
     loadedTrackID = trackID
     loadedMode = mode
     isBuffering.value = autoplay
+    pendingMediaPlaybackIntent = intent?.id ?? 0
     error.value = null
     element.src = url
     element.load()
@@ -299,18 +520,44 @@ export const usePlayerStore = defineStore('player', () => {
         element.currentTime = target
       }
       if (autoplay) {
+        if (!intent) return
+        await intent.endpointReady
+        if (requestID !== sourceRequest || epoch !== playEpoch || !isCurrentPlaybackIntent(intent)) {
+          clearPendingPlayback(intent)
+          return
+        }
+        activeMediaPlaybackIntent = intent.id
         await element.play()
-        if (requestID !== sourceRequest) return
+        if (requestID !== sourceRequest || epoch !== playEpoch || !isCurrentPlaybackIntent(intent)) {
+          if (activeMediaPlaybackIntent === intent.id) {
+            activeMediaPlaybackIntent = 0
+            element.pause()
+          }
+          clearPendingPlayback(intent)
+          return
+        }
+        pendingMediaPlaybackIntent = 0
         isPlaying.value = true
+        isBuffering.value = false
       } else {
+        pendingMediaPlaybackIntent = 0
+        activeMediaPlaybackIntent = 0
         isPlaying.value = false
         isBuffering.value = false
+        if (endpointSuspendTimer === null) scheduleEndpointSuspend()
       }
     } catch {
-      if (requestID !== sourceRequest) return
+      if (
+        requestID !== sourceRequest
+        || epoch !== playEpoch
+        || (intent && !isCurrentPlaybackIntent(intent))
+      ) return
+      pendingMediaPlaybackIntent = 0
+      activeMediaPlaybackIntent = 0
       isPlaying.value = false
       isBuffering.value = false
       error.value = 'Failed to load track'
+      scheduleEndpointSuspend()
     }
   }
 
@@ -319,6 +566,7 @@ export const usePlayerStore = defineStore('player', () => {
     epoch: number,
     preserveCurrent: boolean,
     autoplay: boolean,
+    playback: PlaybackIntent | null,
   ) {
     if (epoch !== playEpoch) return
     queue.value = response.queue
@@ -335,6 +583,7 @@ export const usePlayerStore = defineStore('player', () => {
         currentTime.value = 0
         duration.value = 0
       }
+      abandonPlayback(playback)
       playlistError.value = selectedTag.value ? `No tracks tagged ${selectedTag.value}` : 'No tracks available'
       return
     }
@@ -346,6 +595,7 @@ export const usePlayerStore = defineStore('player', () => {
     }
     const first = response.items.find(item => item.available)
     if (!first) {
+      abandonPlayback(playback)
       playlistError.value = 'No tracks available'
       return
     }
@@ -354,14 +604,20 @@ export const usePlayerStore = defineStore('player', () => {
     currentTime.value = 0
     duration.value = 0
     void refreshMetadata(first.id, epoch)
-    if (autoplay) await loadCurrentSource(0, true)
-    else if (audio) audio.pause()
+    if (autoplay) await loadCurrentSource(0, true, playback)
+    else if (audio) {
+      audio.pause()
+      if (!isPlaying.value && endpointSuspendTimer === null) scheduleEndpointSuspend()
+    }
   }
 
   async function createReplacement(
     tag: string,
     options: { pinCurrent: boolean; preserveCurrent: boolean; autoplay: boolean },
+    suppliedPlayback: PlaybackIntent | null = null,
   ) {
+    const playback = options.autoplay ? suppliedPlayback ?? beginPlaybackIntent() : null
+    if (playback && !isPlaying.value) isBuffering.value = true
     const epoch = ++playEpoch
     abortQueueWork()
     if (!options.preserveCurrent) metadataController?.abort()
@@ -386,12 +642,13 @@ export const usePlayerStore = defineStore('player', () => {
       if (epoch !== playEpoch || controller.signal.aborted) return
       selectedTag.value = tag
       recoveryUsed = false
-      await applyCreatedQueue(response, epoch, options.preserveCurrent, options.autoplay)
+      await applyCreatedQueue(response, epoch, options.preserveCurrent, options.autoplay, playback)
     } catch (requestError) {
       if (epoch !== playEpoch || axios.isCancel(requestError)) return
       selectedTag.value = previousTag
       playlistError.value = 'Failed to prepare playlist'
       if (currentTrack.value) void refreshMetadata(currentTrack.value.id, epoch, false)
+      if (!isPlaying.value) abandonPlayback(playback)
     } finally {
       if (queueController === controller) queueController = null
       if (epoch === playEpoch) playlistLoading.value = false
@@ -418,6 +675,71 @@ export const usePlayerStore = defineStore('player', () => {
     })
   }
 
+  async function prependDirectory(dir: string): Promise<number | null> {
+    const playback = beginPlaybackIntent()
+    if (!isPlaying.value) isBuffering.value = true
+    const epoch = ++playEpoch
+    abortQueueWork()
+    metadataController?.abort()
+    const controller = new AbortController()
+    queueController = controller
+    playlistLoading.value = true
+    playlistError.value = null
+    let temporaryQueueID: string | null = null
+    try {
+      let response: api.PrependDirectoryResponse | null = null
+      const existingQueueID = queue.value?.id
+      if (existingQueueID) {
+        try {
+          response = await api.prependQueueDirectory(existingQueueID, dir, controller.signal)
+        } catch (requestError) {
+          if (errorCode(requestError) !== 'QUEUE_NOT_FOUND' || controller.signal.aborted) throw requestError
+        }
+      }
+      if (!response) {
+        const request = selectedTag.value ? { tag: selectedTag.value } : {}
+        const created = await api.createQueue(request, controller.signal)
+        if (epoch !== playEpoch || controller.signal.aborted) {
+          void api.deleteQueue(created.queue.id)
+          return null
+        }
+        temporaryQueueID = created.queue.id
+        response = await api.prependQueueDirectory(temporaryQueueID, dir, controller.signal)
+        temporaryQueueID = null
+      }
+      if (epoch !== playEpoch || controller.signal.aborted) {
+        void api.deleteQueue(response.queue.id)
+        return null
+      }
+
+      queue.value = response.queue
+      resetPageCache(response)
+      activeIndex.value = 0
+      sidebarPage.value = 1
+      evictPages()
+      recoveryUsed = false
+      const first = response.items.find(item => item.queueIndex === 0 && item.available)
+      if (!first) throw new Error('Directory queue did not return an available first track')
+      syncCurrentTrack(first)
+      currentTime.value = 0
+      duration.value = 0
+      void refreshMetadata(first.id, epoch)
+      await loadCurrentSource(0, true, playback)
+      return response.directoryTrackCount
+    } catch (requestError) {
+      if (temporaryQueueID) {
+        try { await api.deleteQueue(temporaryQueueID) } catch { /* best effort */ }
+      }
+      if (epoch !== playEpoch || axios.isCancel(requestError)) return null
+      if (currentTrack.value) void refreshMetadata(currentTrack.value.id, epoch, false)
+      if (!isPlaying.value) abandonPlayback(playback)
+      throw requestError
+    } finally {
+      if (queueController === controller) queueController = null
+      if (epoch === playEpoch) playlistLoading.value = false
+    }
+  }
+
   async function recoverQueue(epoch: number): Promise<boolean> {
     if (recoveryUsed || epoch !== playEpoch) return false
     recoveryUsed = true
@@ -430,7 +752,7 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       const response = await api.createQueue(request, controller.signal)
       if (epoch !== playEpoch || controller.signal.aborted) return false
-      await applyCreatedQueue(response, epoch, true, false)
+      await applyCreatedQueue(response, epoch, true, false, null)
       return true
     } catch (requestError) {
       if (!axios.isCancel(requestError) && epoch === playEpoch) playlistError.value = 'Playlist expired and could not be restored'
@@ -482,18 +804,23 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function playAt(index: number) {
+    const playback = beginPlaybackIntent()
+    if (!isPlaying.value) isBuffering.value = true
     if (!queue.value) await preparePlaylist()
+    if (!isCurrentPlaybackIntent(playback)) return
     if (!queue.value) {
       error.value = 'No tracks available'
+      abandonPlayback(playback)
       return
     }
     const epoch = ++playEpoch
     selectController?.abort()
     metadataController?.abort()
     const item = await itemAt(index, epoch)
-    if (epoch !== playEpoch) return
+    if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) return
     if (!item || !item.available) {
       error.value = 'Track is unavailable'
+      abandonPlayback(playback)
       return
     }
     activeIndex.value = item.queueIndex
@@ -502,7 +829,7 @@ export const usePlayerStore = defineStore('player', () => {
     currentTime.value = 0
     duration.value = 0
     void refreshMetadata(item.id, epoch)
-    await loadCurrentSource(0, true)
+    await loadCurrentSource(0, true, playback)
   }
 
   async function reconcileSelection(fileID: string, epoch: number) {
@@ -545,6 +872,8 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function playTrack(file: api.FileEntry) {
+    const playback = beginPlaybackIntent()
+    if (!isPlaying.value) isBuffering.value = true
     const epoch = ++playEpoch
     selectController?.abort()
     metadataController?.abort()
@@ -552,44 +881,78 @@ export const usePlayerStore = defineStore('player', () => {
     currentTime.value = 0
     duration.value = 0
     void refreshMetadata(file.id, epoch)
-    await loadCurrentSource(0, true)
+    await loadCurrentSource(0, true, playback)
     if (epoch === playEpoch) void reconcileSelection(file.id, epoch)
   }
 
   function pause() {
-    getAudio().pause()
+    playbackIntent += 1
+    activeMediaPlaybackIntent = 0
+    pendingMediaPlaybackIntent = 0
+    audio?.pause()
     isBuffering.value = false
     isPlaying.value = false
+    scheduleEndpointSuspend()
   }
 
   async function resume() {
+    const playback = beginPlaybackIntent()
+    isBuffering.value = true
     if (!currentTrack.value) {
       if (!queue.value) await preparePlaylist()
-      if (!queue.value || queue.value.total === 0) return
+      if (!isCurrentPlaybackIntent(playback)) return
+      if (!queue.value || queue.value.total === 0) {
+        abandonPlayback(playback)
+        return
+      }
       const item = await itemAt(activeIndex.value, playEpoch)
+      if (!isCurrentPlaybackIntent(playback)) return
       if (item?.available) syncCurrentTrack(item)
     }
-    if (!currentTrack.value) return
+    if (!currentTrack.value) {
+      abandonPlayback(playback)
+      return
+    }
     if (loadedTrackID !== currentTrack.value.id || loadedMode !== streamMode.value) {
-      await loadCurrentSource(currentTime.value, true)
+      await loadCurrentSource(currentTime.value, true, playback)
       return
     }
     const element = getAudio()
-    isBuffering.value = true
+    const epoch = playEpoch
     try {
+      pendingMediaPlaybackIntent = playback.id
+      await playback.endpointReady
+      if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) {
+        clearPendingPlayback(playback)
+        return
+      }
+      activeMediaPlaybackIntent = playback.id
       await element.play()
+      if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) {
+        if (activeMediaPlaybackIntent === playback.id) {
+          activeMediaPlaybackIntent = 0
+          element.pause()
+        }
+        clearPendingPlayback(playback)
+        return
+      }
+      pendingMediaPlaybackIntent = 0
       isPlaying.value = true
       isBuffering.value = false
       error.value = null
     } catch {
+      if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) return
+      pendingMediaPlaybackIntent = 0
+      activeMediaPlaybackIntent = 0
       isPlaying.value = false
       isBuffering.value = false
       error.value = 'Failed to resume playback'
+      scheduleEndpointSuspend()
     }
   }
 
   async function togglePlay() {
-    if (isPlaying.value) pause()
+    if (isPlaying.value || isBuffering.value) pause()
     else await resume()
   }
 
@@ -605,21 +968,29 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   async function next() {
+    const playback = beginPlaybackIntent()
+    if (!isPlaying.value) isBuffering.value = true
     if (!queue.value) await preparePlaylist()
+    if (!isCurrentPlaybackIntent(playback)) return
     if (!queue.value || queue.value.total === 0) {
       error.value = 'No tracks available'
+      abandonPlayback(playback)
       return
     }
     const epoch = ++playEpoch
     const originalQueue = queue.value.id
     const item = await findAvailable(activeIndex.value + 1, 1, epoch)
-    if (epoch !== playEpoch) return
+    if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) return
     if (queue.value?.id !== originalQueue) {
       await next()
       return
     }
     if (!item) {
-      await createReplacement(selectedTag.value, { pinCurrent: false, preserveCurrent: false, autoplay: true })
+      await createReplacement(
+        selectedTag.value,
+        { pinCurrent: false, preserveCurrent: false, autoplay: true },
+        playback,
+      )
       return
     }
     activeIndex.value = item.queueIndex
@@ -628,7 +999,7 @@ export const usePlayerStore = defineStore('player', () => {
     duration.value = 0
     evictPages()
     void refreshMetadata(item.id, epoch)
-    await loadCurrentSource(0, true)
+    await loadCurrentSource(0, true, playback)
   }
 
   async function previous() {
@@ -636,15 +1007,18 @@ export const usePlayerStore = defineStore('player', () => {
       await seek(0)
       return
     }
+    const playback = beginPlaybackIntent()
+    if (!isPlaying.value) isBuffering.value = true
     const epoch = ++playEpoch
     const originalQueue = queue.value.id
     const item = await findAvailable(activeIndex.value - 1, -1, epoch)
-    if (epoch !== playEpoch) return
+    if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) return
     if (queue.value?.id !== originalQueue) {
       await previous()
       return
     }
     if (!item) {
+      abandonPlayback(playback)
       await seek(0)
       return
     }
@@ -654,7 +1028,7 @@ export const usePlayerStore = defineStore('player', () => {
     duration.value = 0
     evictPages()
     void refreshMetadata(item.id, epoch)
-    await loadCurrentSource(0, true)
+    await loadCurrentSource(0, true, playback)
   }
 
   async function showQueuePage(page: number) {
@@ -685,7 +1059,8 @@ export const usePlayerStore = defineStore('player', () => {
     const target = duration.value > 0 ? clamp(seconds, 0, duration.value) : Math.max(seconds, 0)
     const shouldResume = isPlaying.value
     if (streamMode.value === 'opus') {
-      await loadCurrentSource(target, shouldResume)
+      const playback = shouldResume ? beginPlaybackIntent() : null
+      await loadCurrentSource(target, shouldResume, playback)
       return
     }
     const element = getAudio()
@@ -694,17 +1069,19 @@ export const usePlayerStore = defineStore('player', () => {
     try {
       element.currentTime = target
     } catch {
-      await loadCurrentSource(target, shouldResume)
+      const playback = shouldResume ? beginPlaybackIntent() : null
+      await loadCurrentSource(target, shouldResume, playback)
     }
   }
 
   async function setStreamMode(mode: StreamMode) {
     if (streamMode.value === mode) return
     const shouldResume = isPlaying.value
+    const playback = shouldResume ? beginPlaybackIntent() : null
     const position = currentTime.value
     streamMode.value = mode
     try { localStorage.setItem(STORAGE_KEY_STREAM_MODE, mode) } catch { /* ignore */ }
-    if (currentTrack.value) await loadCurrentSource(position, shouldResume)
+    if (currentTrack.value) await loadCurrentSource(position, shouldResume, playback)
   }
 
   function setVolume(value: number) {
@@ -726,7 +1103,11 @@ export const usePlayerStore = defineStore('player', () => {
 
   function reset() {
     playEpoch += 1
+    playbackIntent += 1
+    activeMediaPlaybackIntent = 0
+    pendingMediaPlaybackIntent = 0
     sourceRequest += 1
+    closeEndpoint(false)
     abortQueueWork()
     metadataController?.abort()
     metadataController = null
@@ -794,6 +1175,7 @@ export const usePlayerStore = defineStore('player', () => {
     preparePlaylist,
     filterPlaylistByTag,
     randomizePlaylist,
+    prependDirectory,
     playAt,
     playTrack,
     pause,

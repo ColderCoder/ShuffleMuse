@@ -114,9 +114,6 @@ onBeforeUnmount(() => {
 
 <template>
   <div class="view home-view">
-    <h1 class="view-title">Welcome to ShuffleMuse</h1>
-    <p class="view-subtitle">Your personal music library</p>
-
     <!-- Empty State -->
     <div v-if="player.playlistError" class="home-empty">
       <p class="home-empty-icon">📁</p>
@@ -128,28 +125,6 @@ onBeforeUnmount(() => {
     <div v-else-if="player.playlistLoading && !player.queue" class="home-loading">
       <span class="spinner"></span>
       <p>Scanning library...</p>
-    </div>
-
-    <!-- Main Content -->
-    <div v-else class="home-actions">
-      <div class="tag-filter">
-        <label class="form-label" for="tag-filter">Filter by tag (optional)</label>
-        <select
-          id="tag-filter"
-          v-model="player.selectedTag"
-          class="form-input tag-select"
-          @change="player.filterPlaylistByTag(player.selectedTag)"
-        >
-          <option value="">All tags</option>
-          <option
-            v-for="tag in tagsStore.tags"
-            :key="tag.id"
-            :value="tag.name"
-          >
-            {{ tag.name }}{{ tag.count !== undefined ? ` (${tag.count})` : '' }}
-          </option>
-        </select>
-      </div>
     </div>
 
     <div v-if="player.currentTrack && !player.playlistLoading" class="now-playing-info">
@@ -182,25 +157,37 @@ onBeforeUnmount(() => {
         <span class="default-cover-record" aria-hidden="true"></span>
         <span class="default-cover-caption" aria-hidden="true">No artwork</span>
       </div>
+      <div class="tag-filter">
+        <label class="form-label" for="tag-filter">Filter by tag</label>
+        <select
+          id="tag-filter"
+          v-model="player.selectedTag"
+          class="form-input tag-select"
+          @change="player.filterPlaylistByTag(player.selectedTag)"
+        >
+          <option value="">All tags</option>
+          <option
+            v-for="tag in tagsStore.tags"
+            :key="tag.id"
+            :value="tag.name"
+          >
+            {{ tag.name }}{{ tag.count !== undefined ? ` (${tag.count})` : '' }}
+          </option>
+        </select>
+      </div>
     </div>
   </div>
 </template>
 
 <style scoped>
-.home-actions {
-  display: flex;
-  width: 100%;
-  flex-direction: column;
-  align-items: center;
-  margin-top: 1rem;
-}
-
 .tag-filter {
   display: flex;
   flex-direction: column;
   gap: 0.375rem;
   width: 100%;
   max-width: 280px;
+  margin: 1rem auto 0;
+  text-align: left;
 }
 
 .tag-select {
@@ -209,7 +196,7 @@ onBeforeUnmount(() => {
 
 .now-playing-info {
   width: 100%;
-  margin-top: 2rem;
+  margin-top: 0;
   text-align: center;
 }
 

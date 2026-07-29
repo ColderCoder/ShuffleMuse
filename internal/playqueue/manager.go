@@ -29,6 +29,7 @@ const (
 var (
 	ErrNotFound     = errors.New("queue not found")
 	ErrFileNotFound = errors.New("file not found")
+	ErrNoAudioFiles = errors.New("directory contains no audio files")
 	ErrBusy         = errors.New("queue builder is busy")
 	ErrCapacity     = errors.New("queue cache capacity exceeded")
 )
@@ -89,6 +90,11 @@ type CreateResult struct {
 type SelectResult struct {
 	Page
 	QueueIndex int `json:"queueIndex"`
+}
+
+type PrependResult struct {
+	Page
+	DirectoryTrackCount int `json:"directoryTrackCount"`
 }
 
 type snapshotRef struct {
@@ -383,6 +389,130 @@ func (m *Manager) Select(ctx context.Context, token, fileID string, current *ind
 	m.totalBytes = saturatedAdd(m.totalBytes, replacement.bytes)
 	m.evictLocked(newDigest)
 	return SelectResult{Page: m.pageLocked(replacement, newToken, 1, current, generation), QueueIndex: 0}, nil
+}
+
+func (m *Manager) Prepend(
+	ctx context.Context,
+	token string,
+	entries []index.FileEntry,
+	current *index.Index,
+	generation uint64,
+) (PrependResult, error) {
+	if err := ctx.Err(); err != nil {
+		return PrependResult{}, err
+	}
+	digest, ok := decodeToken(token)
+	if !ok {
+		return PrependResult{}, ErrNotFound
+	}
+	if current == nil {
+		return PrependResult{}, ErrFileNotFound
+	}
+	if err := m.builds.acquire(ctx); err != nil {
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return PrependResult{}, err
+		}
+		return PrependResult{}, ErrBusy
+	}
+	defer m.builds.release()
+
+	now := m.now()
+	m.mu.Lock()
+	q := m.queues[digest]
+	if q == nil || now.Sub(q.lastAccess) >= m.config.Idle {
+		if q != nil {
+			m.removeLocked(q)
+		}
+		m.mu.Unlock()
+		return PrependResult{}, ErrNotFound
+	}
+	q.lastAccess = now
+	m.mu.Unlock()
+
+	selected := make(map[string]struct{}, len(entries))
+	prefix := make([]index.FileEntry, 0, len(entries)+len(q.prefix))
+	for i := range entries {
+		if i&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return PrependResult{}, err
+			}
+		}
+		entry := entries[i]
+		online := current.ByID[entry.ID]
+		if online == nil || online.Filepath != entry.Filepath {
+			continue
+		}
+		if _, exists := selected[entry.ID]; exists {
+			continue
+		}
+		selected[entry.ID] = struct{}{}
+		prefix = append(prefix, entry)
+	}
+	if len(prefix) == 0 {
+		return PrependResult{}, ErrNoAudioFiles
+	}
+	directoryTrackCount := len(prefix)
+	for i := range q.prefix {
+		if i&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return PrependResult{}, err
+			}
+		}
+		if _, exists := selected[q.prefix[i].ID]; !exists {
+			prefix = append(prefix, q.prefix[i])
+		}
+	}
+	order := make([]uint32, 0, len(q.order))
+	for i, position := range q.order {
+		if i&1023 == 0 {
+			if err := ctx.Err(); err != nil {
+				return PrependResult{}, err
+			}
+		}
+		if int(position) >= len(q.snapshot.index.Files) {
+			continue
+		}
+		if _, exists := selected[q.snapshot.index.Files[position].ID]; !exists {
+			order = append(order, position)
+		}
+	}
+
+	newToken, newDigest, err := m.newToken()
+	if err != nil {
+		return PrependResult{}, err
+	}
+	replacement := &queue{
+		digest: newDigest, tag: q.tag, createdGeneration: q.createdGeneration,
+		snapshot: q.snapshot, order: order, prefix: prefix,
+		createdAt: now, lastAccess: now,
+	}
+	replacement.bytes = estimateQueue(replacement)
+
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if err := ctx.Err(); err != nil {
+		return PrependResult{}, err
+	}
+	if m.queues[digest] != q {
+		return PrependResult{}, ErrNotFound
+	}
+	if _, exists := m.queues[newDigest]; exists {
+		return PrependResult{}, errors.New("queue token collision")
+	}
+	if saturatedAdd(q.snapshot.bytes, replacement.bytes) > m.config.MaxBytes {
+		return PrependResult{}, ErrCapacity
+	}
+	// Transfer the shared snapshot to the immutable replacement. The old queue
+	// may still be referenced by a concurrent read-only scan, so leave it intact.
+	m.totalBytes -= q.bytes
+	delete(m.queues, q.digest)
+	m.queues[newDigest] = replacement
+	m.totalBytes = saturatedAdd(m.totalBytes, replacement.bytes)
+	m.evictLocked(newDigest)
+	return PrependResult{
+		Page:                m.pageLocked(replacement, newToken, 1, current, generation),
+		DirectoryTrackCount: directoryTrackCount,
+	}, nil
 }
 
 func (m *Manager) Delete(token string) {

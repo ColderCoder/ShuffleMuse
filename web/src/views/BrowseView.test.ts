@@ -5,6 +5,7 @@ import { createMemoryHistory, createRouter } from 'vue-router'
 import BrowseView from './BrowseView.vue'
 import * as api from '../api'
 import { useLibraryStore } from '../stores/library'
+import { usePlayerStore } from '../stores/player'
 
 function deferred<T>() {
   let resolve!: (value: T) => void
@@ -34,6 +35,7 @@ describe('BrowseView', () => {
       .mockResolvedValueOnce({
         files: [],
         total: 0,
+        audioCount: 0,
         page: 1,
         directories: [{ name: 'Artist', path: 'Artist' }],
       })
@@ -53,6 +55,7 @@ describe('BrowseView', () => {
           trackName: 'Track',
         }],
         total: 1,
+        audioCount: 1,
         page: 1,
         directories: [],
       })
@@ -108,6 +111,7 @@ describe('BrowseView', () => {
         audioId: 'new',
       }],
       total: 1,
+      audioCount: 1,
       page: 1,
       directories: [],
     })
@@ -129,6 +133,7 @@ describe('BrowseView', () => {
         audioId: 'old',
       }],
       total: 1,
+      audioCount: 1,
       page: 1,
       directories: [],
     })
@@ -138,7 +143,7 @@ describe('BrowseView', () => {
     expect(wrapper.text()).not.toContain('old.flac')
   })
 
-	it('starts a rescan from the browse toolbar', async () => {
+  it('starts a rescan from the browse toolbar', async () => {
 	  const router = createRouter({
 		history: createMemoryHistory(),
 		routes: [{ path: '/browse', name: 'browse', component: BrowseView }],
@@ -170,16 +175,115 @@ describe('BrowseView', () => {
 	  expect(library.scanStatus).toBe('scanning')
 	})
 
+  it('plays the current folder from the queue front', async () => {
+    vi.mocked(api.getBrowse).mockReset()
+    vi.mocked(api.getBrowse).mockResolvedValue({
+      files: [{
+        id: 'one',
+        name: 'track.flac',
+        path: 'Artist/track.flac',
+        dir: 'Artist',
+        kind: 'audio',
+        mimeType: 'audio/flac',
+        size: 1,
+        modified: '',
+        previewable: false,
+        playable: true,
+        audioId: 'one',
+      }],
+      directories: [],
+      total: 1,
+      audioCount: 1,
+      page: 1,
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/browse', name: 'browse', component: BrowseView }],
+    })
+    await router.push({ name: 'browse', query: { dir: 'Artist' } })
+    await router.isReady()
+    const pinia = createPinia()
+    const player = usePlayerStore(pinia)
+    player.queue = { id: 'queue', tag: '', createdGeneration: 1, total: 1, pageSize: 200 }
+    const prepend = vi.spyOn(player, 'prependDirectory').mockResolvedValue(1)
+    const wrapper = mount(BrowseView, { global: { plugins: [pinia, router] } })
+    await flushPromises()
+
+    const button = wrapper.get('.folder-play-button')
+    expect(button.text()).toContain('Play folder')
+    expect(button.attributes('disabled')).toBeUndefined()
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(prepend).toHaveBeenCalledWith('Artist')
+    expect(wrapper.get('.queue-message').text()).toBe('Playing 1 track from this folder')
+  })
+
+  it('disables empty folders and reports a directory queue failure', async () => {
+    vi.mocked(api.getBrowse).mockReset()
+    vi.mocked(api.getBrowse)
+      .mockResolvedValueOnce({
+        files: [],
+        directories: [],
+        total: 0,
+        audioCount: 0,
+        page: 1,
+      })
+      .mockResolvedValueOnce({
+        files: [{
+          id: 'one',
+          name: 'track.flac',
+          path: 'Artist/track.flac',
+          dir: 'Artist',
+          kind: 'audio',
+          mimeType: 'audio/flac',
+          size: 1,
+          modified: '',
+          previewable: false,
+          playable: true,
+          audioId: 'one',
+        }],
+        directories: [],
+        total: 1,
+        audioCount: 1,
+        page: 1,
+      })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/browse', name: 'browse', component: BrowseView }],
+    })
+    await router.push('/browse')
+    await router.isReady()
+    const pinia = createPinia()
+    const player = usePlayerStore(pinia)
+    player.queue = { id: 'queue', tag: '', createdGeneration: 1, total: 1, pageSize: 200 }
+    const prepend = vi.spyOn(player, 'prependDirectory').mockRejectedValue(new Error('queue failed'))
+    const wrapper = mount(BrowseView, { global: { plugins: [pinia, router] } })
+    await flushPromises()
+
+    expect(wrapper.get('.folder-play-button').attributes('disabled')).toBeDefined()
+
+    await router.push({ name: 'browse', query: { dir: 'Artist' } })
+    await flushPromises()
+    const button = wrapper.get('.folder-play-button')
+    expect(button.attributes('disabled')).toBeUndefined()
+    await button.trigger('click')
+    await flushPromises()
+
+    expect(prepend).toHaveBeenCalledWith('Artist')
+    expect(wrapper.get('[role="alert"]').text()).toBe('Failed to add this folder to the playlist')
+  })
+
   it('replaces the current page instead of appending results', async () => {
     vi.mocked(api.getBrowse).mockReset()
     vi.mocked(api.getBrowse)
       .mockResolvedValueOnce({
         files: [{ id: 'first', name: 'first.flac', path: 'first.flac', dir: '.', kind: 'audio', mimeType: 'audio/flac', size: 1, modified: '', previewable: false, playable: true, audioId: 'first' }],
-        directories: [], total: 51, page: 1,
+        directories: [], total: 51, audioCount: 51, page: 1,
       })
       .mockResolvedValueOnce({
         files: [{ id: 'last', name: 'last.flac', path: 'last.flac', dir: '.', kind: 'audio', mimeType: 'audio/flac', size: 1, modified: '', previewable: false, playable: true, audioId: 'last' }],
-        directories: [], total: 51, page: 2,
+        directories: [], total: 51, audioCount: 51, page: 2,
       })
     const router = createRouter({ history: createMemoryHistory(), routes: [{ path: '/browse', name: 'browse', component: BrowseView }] })
     await router.push('/browse')

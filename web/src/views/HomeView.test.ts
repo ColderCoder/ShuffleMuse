@@ -34,11 +34,27 @@ describe('HomeView', () => {
     vi.useRealTimers()
   })
 
-  it('keeps tag filtering without a large Randomize action', async () => {
-    const wrapper = await mountHome()
+  it('places tag filtering below the cover without the welcome copy', async () => {
+    const pinia = createPinia()
+    setActivePinia(pinia)
+    const player = usePlayerStore()
+    player.currentTrack = {
+      id: 'one',
+      name: 'Track One',
+      dir: 'Album',
+      filepath: 'Album/one.flac',
+      streamUrl: '/api/stream/one',
+    }
+    const wrapper = await mountHome(pinia)
     await flushPromises()
 
     expect(wrapper.find('#tag-filter').exists()).toBe(true)
+    expect(wrapper.get('label[for="tag-filter"]').text()).toBe('Filter by tag')
+    expect(wrapper.text()).not.toContain('Welcome to ShuffleMuse')
+    expect(wrapper.text()).not.toContain('Your personal music library')
+    const cover = wrapper.get('.now-playing-cover').element
+    const filter = wrapper.get('.tag-filter').element
+    expect(cover.compareDocumentPosition(filter) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
     expect(wrapper.findAll('button').some(button => button.text().includes('Randomize'))).toBe(false)
   })
 

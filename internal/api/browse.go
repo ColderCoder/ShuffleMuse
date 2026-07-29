@@ -140,6 +140,8 @@ func (a *API) handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 	initialCapacity := min(retainedLimit, 4096)
 	retainedCandidates := make(browseCandidateHeap, 0, initialCapacity)
+	idx, generation := a.currentSnapshot(r)
+	audioCount := 0
 	total := 0
 	for {
 		if r.Context().Err() != nil {
@@ -157,6 +159,13 @@ func (a *API) handleBrowse(w http.ResponseWriter, r *http.Request) {
 				candidate.isDirectory = true
 			case isRegular:
 				// Files sort after directories.
+				if index.AudioExtensions[strings.ToLower(filepath.Ext(entry.Name()))] {
+					relPath := browseRelativePath(dir, entry.Name())
+					audio := idx.ByID[index.GenerateID(relPath)]
+					if audio != nil && filepath.Clean(audio.Filepath) == filepath.Clean(relPath) {
+						audioCount++
+					}
+				}
 			default:
 				continue
 			}
@@ -181,7 +190,6 @@ func (a *API) handleBrowse(w http.ResponseWriter, r *http.Request) {
 
 	directories := make([]browseDirectory, 0, len(pageCandidates))
 	files := make([]browseFile, 0, len(pageCandidates))
-	idx, generation := a.currentSnapshot(r)
 	for _, candidate := range pageCandidates {
 		if r.Context().Err() != nil {
 			return
@@ -204,6 +212,7 @@ func (a *API) handleBrowse(w http.ResponseWriter, r *http.Request) {
 		"directories": directories,
 		"files":       files,
 		"total":       total,
+		"audioCount":  audioCount,
 		"page":        page,
 		"generation":  generation,
 	})
