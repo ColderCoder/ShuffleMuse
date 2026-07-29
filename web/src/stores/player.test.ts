@@ -299,7 +299,7 @@ describe('player store server queues', () => {
     expect(player.isPlaying).toBe(true)
   })
 
-  it('warms a cold audio endpoint for 1.5 seconds before starting media', async () => {
+  it('does not delay media while activating a cold audio endpoint', async () => {
     vi.useFakeTimers()
     enableWebAudio()
     const player = usePlayerStore()
@@ -310,17 +310,12 @@ describe('player store server queues', () => {
     const audio = FakeAudio.instances[0]
     expect(FakeAudioContext.instances).toHaveLength(1)
     expect(audio.src).toContain('/api/stream/one')
-    expect(audio.playCalls).toBe(0)
-    expect(player.isBuffering).toBe(true)
-
-    await vi.advanceTimersByTimeAsync(1499)
-    expect(audio.playCalls).toBe(0)
-    await vi.advanceTimersByTimeAsync(1)
+    expect(audio.playCalls).toBe(1)
     await playback
 
-    expect(audio.playCalls).toBe(1)
     expect(player.isPlaying).toBe(true)
     expect(player.isBuffering).toBe(false)
+    expect(vi.getTimerCount()).toBe(0)
     player.reset()
   })
 
@@ -333,9 +328,7 @@ describe('player store server queues', () => {
     const player = usePlayerStore()
     await player.preparePlaylist()
 
-    const first = player.playAt(0)
-    await vi.advanceTimersByTimeAsync(1500)
-    await first
+    await player.playAt(0)
     const context = FakeAudioContext.instances[0]
     const audio = FakeAudio.instances[0]
 
@@ -354,14 +347,12 @@ describe('player store server queues', () => {
     player.reset()
   })
 
-  it('keeps the endpoint warm for 15 seconds after pause, then warms it again', async () => {
+  it('keeps the endpoint active for 15 seconds and reactivates it without delaying media', async () => {
     vi.useFakeTimers()
     enableWebAudio()
     const player = usePlayerStore()
     await player.preparePlaylist()
-    const first = player.playAt(0)
-    await vi.advanceTimersByTimeAsync(1500)
-    await first
+    await player.playAt(0)
     const context = FakeAudioContext.instances[0]
     const audio = FakeAudio.instances[0]
 
@@ -376,37 +367,29 @@ describe('player store server queues', () => {
     expect(context.suspendCalls).toBe(1)
     expect(context.state).toBe('suspended')
 
-    const resumed = player.resume()
-    await vi.advanceTimersByTimeAsync(1499)
-    expect(audio.playCalls).toBe(2)
-    await vi.advanceTimersByTimeAsync(1)
-    await resumed
+    await player.resume()
     expect(audio.playCalls).toBe(3)
     expect(context.resumeCalls).toBe(2)
     player.reset()
   })
 
-  it('lets pause cancel media playback while the endpoint is warming', async () => {
-    vi.useFakeTimers()
+  it('lets pause cancel playback before pending track selection starts media', async () => {
     enableWebAudio()
     const player = usePlayerStore()
     await player.preparePlaylist()
 
     const playback = player.playAt(0)
-    await vi.advanceTimersByTimeAsync(500)
     expect(player.isBuffering).toBe(true)
     await player.togglePlay()
     expect(player.isBuffering).toBe(false)
 
-    await vi.advanceTimersByTimeAsync(1000)
     await playback
-    expect(FakeAudio.instances[0].playCalls).toBe(0)
+    expect(FakeAudio.instances).toHaveLength(0)
     expect(player.isPlaying).toBe(false)
     player.reset()
   })
 
-  it('only starts the latest track selected during endpoint warmup', async () => {
-    vi.useFakeTimers()
+  it('only starts the latest track when track selections overlap', async () => {
     enableWebAudio()
     vi.mocked(api.createQueue).mockResolvedValue(page(
       'two-tracks', 1, 2, [item(0, 'one'), item(1, 'two')],
@@ -415,9 +398,7 @@ describe('player store server queues', () => {
     await player.preparePlaylist()
 
     const first = player.playAt(0)
-    await vi.advanceTimersByTimeAsync(500)
     const second = player.playAt(1)
-    await vi.advanceTimersByTimeAsync(1000)
     await Promise.all([first, second])
 
     const audio = FakeAudio.instances[0]
@@ -428,19 +409,14 @@ describe('player store server queues', () => {
     player.reset()
   })
 
-  it('cancels warmup playback and releases endpoint resources on reset', async () => {
+  it('cancels pending playback and releases endpoint resources on reset', async () => {
     vi.useFakeTimers()
     enableWebAudio()
     const player = usePlayerStore()
     await player.preparePlaylist()
 
     const playback = player.playAt(0)
-    await vi.advanceTimersByTimeAsync(0)
     const context = FakeAudioContext.instances[0]
-    const audio = FakeAudio.instances[0]
-    player.pause()
-    player.pause()
-    expect(vi.getTimerCount()).toBe(2)
 
     player.reset()
     expect(context.source.stopCalls).toBe(1)
@@ -449,9 +425,8 @@ describe('player store server queues', () => {
     expect(context.closeCalls).toBe(1)
     expect(vi.getTimerCount()).toBe(0)
 
-    await vi.advanceTimersByTimeAsync(1500)
     await playback
-    expect(audio.playCalls).toBe(0)
+    expect(FakeAudio.instances).toHaveLength(0)
   })
 
   it('falls back immediately when Web Audio is unsupported or cannot start', async () => {

@@ -7,7 +7,6 @@ const STORAGE_KEY_VOLUME = 'shufflemuse-volume'
 const STORAGE_KEY_MUTED = 'shufflemuse-muted'
 const STORAGE_KEY_STREAM_MODE = 'shufflemuse-stream-mode'
 const MAX_CACHED_PAGES = 5
-const ENDPOINT_WARMUP_MS = 1500
 const ENDPOINT_KEEPALIVE_MS = 15000
 
 export type StreamMode = 'original' | 'opus'
@@ -27,7 +26,6 @@ interface CachedPage {
 
 interface PlaybackIntent {
   id: number
-  endpointReady: Promise<void>
 }
 
 function loadVolume(): number {
@@ -107,12 +105,8 @@ export const usePlayerStore = defineStore('player', () => {
   let endpointContext: AudioContext | null = null
   let endpointSource: ConstantSourceNode | null = null
   let endpointGain: GainNode | null = null
-  let endpointWarm = false
   let endpointDisabled = false
   let endpointGeneration = 0
-  let endpointWarmupTimer: ReturnType<typeof setTimeout> | null = null
-  let endpointWarmupPromise: Promise<void> | null = null
-  let resolveEndpointWarmup: (() => void) | null = null
   let endpointSuspendTimer: ReturnType<typeof setTimeout> | null = null
   let queueController: AbortController | null = null
   let selectController: AbortController | null = null
@@ -139,21 +133,9 @@ export const usePlayerStore = defineStore('player', () => {
     endpointSuspendTimer = null
   }
 
-  function settleEndpointWarmup() {
-    if (endpointWarmupTimer !== null) {
-      clearTimeout(endpointWarmupTimer)
-      endpointWarmupTimer = null
-    }
-    const resolve = resolveEndpointWarmup
-    resolveEndpointWarmup = null
-    endpointWarmupPromise = null
-    resolve?.()
-  }
-
   function closeEndpoint(disable: boolean) {
     endpointGeneration += 1
     clearEndpointSuspendTimer()
-    settleEndpointWarmup()
 
     const context = endpointContext
     const source = endpointSource
@@ -161,7 +143,6 @@ export const usePlayerStore = defineStore('player', () => {
     endpointContext = null
     endpointSource = null
     endpointGain = null
-    endpointWarm = false
     endpointDisabled = disable
 
     try { source?.stop() } catch { /* already stopped */ }
@@ -211,48 +192,25 @@ export const usePlayerStore = defineStore('player', () => {
     }
   }
 
-  function warmEndpoint(): Promise<void> {
+  function resumeEndpoint(context: AudioContext) {
+    if (context.state === 'running') return
+    try {
+      void context.resume().catch(() => {
+        if (endpointContext === context) closeEndpoint(true)
+      })
+    } catch {
+      if (endpointContext === context) closeEndpoint(true)
+    }
+  }
+
+  function activateEndpoint() {
     endpointGeneration += 1
     clearEndpointSuspendTimer()
-    if (endpointDisabled) return Promise.resolve()
-    if (endpointWarmupPromise) return endpointWarmupPromise
+    if (endpointDisabled) return
 
     if (endpointContext?.state === 'closed') closeEndpoint(false)
-    if (endpointContext && endpointWarm && endpointContext.state === 'running') {
-      return Promise.resolve()
-    }
-
     const context = endpointContext ?? createEndpointContext()
-    if (!context) return Promise.resolve()
-    endpointWarm = false
-
-    endpointWarmupPromise = new Promise<void>(resolve => {
-      resolveEndpointWarmup = resolve
-    })
-    const ready = endpointWarmupPromise
-    endpointWarmupTimer = setTimeout(() => {
-      if (endpointContext === context) endpointWarm = context.state === 'running'
-      settleEndpointWarmup()
-    }, ENDPOINT_WARMUP_MS)
-
-    let resumed: Promise<void>
-    try {
-      resumed = context.state === 'running' ? Promise.resolve() : context.resume()
-    } catch {
-      closeEndpoint(true)
-      return ready
-    }
-    void resumed.then(
-      () => {
-        if (endpointContext === context && endpointWarmupPromise === null) {
-          endpointWarm = context.state === 'running'
-        }
-      },
-      () => {
-        if (endpointContext === context) closeEndpoint(true)
-      },
-    )
-    return ready
+    if (context) resumeEndpoint(context)
   }
 
   function scheduleEndpointSuspend() {
@@ -263,28 +221,15 @@ export const usePlayerStore = defineStore('player', () => {
     endpointSuspendTimer = setTimeout(() => {
       endpointSuspendTimer = null
       if (endpointContext !== context || endpointGeneration !== generation) return
-      endpointWarm = false
       try {
         void context.suspend().then(
           () => {
             if (endpointContext !== context || endpointGeneration === generation) return
-            try {
-              void context.resume().then(() => {
-                if (endpointContext === context && endpointWarmupPromise === null) {
-                  endpointWarm = context.state === 'running'
-                }
-              }, () => {})
-            } catch { /* playback still falls back after the warmup deadline */ }
+            resumeEndpoint(context)
           },
-          () => {
-            if (endpointContext === context && endpointGeneration === generation) {
-              endpointWarm = context.state === 'running'
-            }
-          },
+          () => {},
         )
-      } catch {
-        endpointWarm = context.state === 'running'
-      }
+      } catch { /* keep playback independent of endpoint keepalive failures */ }
     }, ENDPOINT_KEEPALIVE_MS)
   }
 
@@ -296,7 +241,8 @@ export const usePlayerStore = defineStore('player', () => {
       pendingMediaPlaybackIntent = id
       isBuffering.value = true
     }
-    return { id, endpointReady: warmEndpoint() }
+    activateEndpoint()
+    return { id }
   }
 
   function isCurrentPlaybackIntent(intent: PlaybackIntent): boolean {
@@ -521,7 +467,6 @@ export const usePlayerStore = defineStore('player', () => {
       }
       if (autoplay) {
         if (!intent) return
-        await intent.endpointReady
         if (requestID !== sourceRequest || epoch !== playEpoch || !isCurrentPlaybackIntent(intent)) {
           clearPendingPlayback(intent)
           return
@@ -921,7 +866,6 @@ export const usePlayerStore = defineStore('player', () => {
     const epoch = playEpoch
     try {
       pendingMediaPlaybackIntent = playback.id
-      await playback.endpointReady
       if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) {
         clearPendingPlayback(playback)
         return
