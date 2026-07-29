@@ -4,6 +4,34 @@ All notable changes to ShuffleMuse are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.2] - 2026-07-29
+
+### Added
+
+- A Browse action that moves the current folder's directly contained audio
+  files to the front of the active queue and starts the first track, without
+  duplicating those files or discarding the rest of the randomized queue.
+- Best-effort Web Audio endpoint activation and a 15-second post-pause
+  keepalive on supported browsers, without a fixed delay before media playback.
+
+### Changed
+
+- Original-file responses now preserve the response writer's optimized
+  `io.ReaderFrom` copy path through logging and commit-tracking middleware.
+- Library status refreshes reuse the initial authentication response, poll every
+  2 seconds only during scans, fall back to 30 seconds while idle, and pause
+  while the page is hidden.
+- The Home view now gives the current track, artwork, and tag filter a more
+  compact layout.
+
+### Fixed
+
+- Cancelled stale playback intents after pause, overlapping track selections,
+  source changes, and player reset so late asynchronous work cannot start old
+  audio.
+- Prevented the stream-mode selector from covering the next-track control
+  across intermediate viewport widths.
+
 ## [0.1.1] - 2026-07-24
 
 ### Added
@@ -44,5 +72,6 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Multi-architecture GHCR image publication for `linux/amd64` and
   `linux/arm64`.
 
+[0.1.2]: https://github.com/ColderCoder/ShuffleMuse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ColderCoder/ShuffleMuse/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ColderCoder/ShuffleMuse/tree/v0.1.0

@@ -149,11 +149,13 @@ sequenceDiagram
 
 同 generation 的队列引用同一只读 `Index`，不复制 `Files` 或 `ByID`。
 标签候选和 pin 只影响 `uint32` 顺序及小型前缀覆盖；带标签的队列只接受
-同样属于该标签的 pin，避免标签外曲目混入。容量核算把不同快照只计一次；
-旧 generation 在最后一个队列释放后可回收。队列排列不可变，固定 200 条
-分页只做切片。选取任意歌曲时的线性位置扫描在全局 Manager 锁外执行并
-响应 request cancellation；重新加锁后必须校验原队列身份，才返回页面或
-原子替换队列。
+同样属于该标签的 pin，避免标签外曲目混入。Browse 的目录播放会把目录
+直接包含的在线音频按文件名排序后写入前缀、从原前缀与随机顺序中去重，
+并以新令牌原子替换旧队列。容量核算把不同快照只计一次；旧 generation
+在最后一个队列释放后可回收。队列排列不可变，固定 200 条分页只做切片。
+选取任意歌曲时的线性位置扫描和目录前缀构建都在全局 Manager 锁外执行
+并响应 request cancellation；重新加锁后必须校验原队列身份，才返回页面
+或原子替换队列。
 
 重扫发布不修改队列：页面 materialize 时用当前 Index 检查 ID/路径，删除项显示 `available:false`，next/previous 跳过；新增项只进入下一次新建或 Randomize。TTL/LRU 淘汰后前端最多自动恢复一次，以相同标签和当前歌曲 pin 创建新队列，同时保留正在播放的 Audio source。
 
@@ -250,8 +252,8 @@ HEAD/304 只读取 descriptor，不启动 FFmpeg。未转换外置图使用 `Ope
 | Store | 主要责任 |
 | --- | --- |
 | `auth` | 四态认证状态机、登录/退出和显式重试 |
-| `library` | 2 秒状态轮询、首次扫描、重扫和 generation |
-| `player` | Audio 元素、队列描述/全局位置、最多 5 页 LRU、播放意图、模式和 metadata |
+| `library` | 扫描时 2 秒/空闲时 30 秒的可见页状态轮询、首次扫描、重扫和 generation |
+| `player` | Audio 元素、端点保温、队列描述/全局位置、最多 5 页 LRU、播放意图、模式和 metadata |
 | `tags` | 标签云、当前 200 条标签文件页和 selection |
 
 ### 异步一致性
@@ -263,6 +265,7 @@ HEAD/304 只读取 descriptor，不启动 FFmpeg。未转换外置图使用 `Ope
 - stop 后状态与重扫请求被取消且不能回写；
 - 文本 Preview 卸载时取消仍在进行的内容请求；
 - 用户显式选歌后，旧 playlist 请求不能替换它；
+- pause、重叠选曲和 reset 会使旧播放意图失效，迟到任务不能启动旧音频；
 - 标签文件只保留当前服务端分页；播放列表页面要求同一个 generation；
 - logout 和 Session 过期会统一重置播放器、曲库和标签状态。
 

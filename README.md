@@ -26,7 +26,7 @@ ShuffleMuse 是一个面向个人和小型自托管场景的轻量音乐库播�
 ## 快速部署
 
 要求 Docker Engine 和 Docker Compose 插件。默认配置拉取公开的
-`ghcr.io/coldercoder/shufflemuse:0.1.1`。把音乐文件放入项目根目录的
+`ghcr.io/coldercoder/shufflemuse:0.1.2`。把音乐文件放入项目根目录的
 `music/` 后执行：
 
 ```bash
@@ -177,7 +177,7 @@ Tags 页的 CSV 用于查看和外部处理，没有对应的导入功能，不�
 
 ## 版本与镜像
 
-- 稳定版本由对应 Git 标签发布；`v0.1.1` 对应镜像标签 `0.1.1`、`0.1`、
+- 稳定版本由对应 Git 标签发布；`v0.1.2` 对应镜像标签 `0.1.2`、`0.1`、
   `0` 和 `latest`。
 - 支持 `linux/amd64` 与 `linux/arm64`。
 - `shufflemuse --version` 输出版本、Git commit 与构建时间。
