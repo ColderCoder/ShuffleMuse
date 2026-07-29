@@ -4,9 +4,12 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/ColderCoder/ShuffleMuse/internal/index"
 	"github.com/ColderCoder/ShuffleMuse/internal/playqueue"
 )
 
@@ -98,6 +101,113 @@ func TestQueueAPIPinTagReplaceAndStableErrors(t *testing.T) {
 	missingFile, missingFileBody := postJSON(t, env.server.URL+"/api/queues", `{"pinFileId":"missing"}`, nil)
 	if missingFile.StatusCode != http.StatusNotFound || missingFileBody["code"] != "FILE_NOT_FOUND" {
 		t.Fatalf("missing file = %d/%v", missingFile.StatusCode, missingFileBody)
+	}
+}
+
+func TestQueueAPIPrependsDirectDirectoryAudioInFilenameOrder(t *testing.T) {
+	env := setupTestEnv(t)
+	defer env.teardown()
+	nestedDir := filepath.Join(env.tmpDir, "music", "artist1", "Disc 2")
+	if err := os.MkdirAll(nestedDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(nestedDir, "nested.flac"), []byte("fake audio data"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	next, err := index.Scan(filepath.Join(env.tmpDir, "music"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.api.UpdateIndex(next)
+	env.idx = next
+
+	directTagged := next.ByID[index.GenerateID(filepath.Join("artist1", "track2.flac"))]
+	if directTagged == nil {
+		t.Fatal("direct tagged track not indexed")
+	}
+	if err := env.tagStore.AddTag(directTagged.Filepath, "focus"); err != nil {
+		t.Fatal(err)
+	}
+	createdResponse, created := postJSON(t, env.server.URL+"/api/queues", `{"tag":"focus"}`, nil)
+	if createdResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d/%v", createdResponse.StatusCode, created)
+	}
+	oldID := created["queue"].(map[string]interface{})["id"].(string)
+
+	response, result := postJSON(
+		t,
+		env.server.URL+"/api/queues/"+oldID+"/prepend-directory",
+		`{"dir":"artist1"}`,
+		nil,
+	)
+	if response.StatusCode != http.StatusOK {
+		t.Fatalf("prepend = %d/%v", response.StatusCode, result)
+	}
+	queue := result["queue"].(map[string]interface{})
+	if queue["id"] == oldID || queue["tag"] != "focus" || int(queue["total"].(float64)) != 3 {
+		t.Fatalf("replacement queue = %v", queue)
+	}
+	if int(result["directoryTrackCount"].(float64)) != 3 {
+		t.Fatalf("directory track count = %v", result["directoryTrackCount"])
+	}
+	items := result["items"].([]interface{})
+	if len(items) != 3 {
+		t.Fatalf("items = %v", items)
+	}
+	wantNames := []string{"track1", "track2", "track3"}
+	seen := make(map[string]bool)
+	for index, raw := range items {
+		item := raw.(map[string]interface{})
+		if item["name"] != wantNames[index] || int(item["queueIndex"].(float64)) != index {
+			t.Fatalf("item %d = %v, want %q", index, item, wantNames[index])
+		}
+		id := item["id"].(string)
+		if seen[id] {
+			t.Fatalf("duplicate directory item %q", id)
+		}
+		seen[id] = true
+	}
+	oldResponse, old := getJSON(t, env.server.URL+"/api/queues/"+oldID+"/items?page=1", nil)
+	if oldResponse.StatusCode != http.StatusNotFound || old["code"] != "QUEUE_NOT_FOUND" {
+		t.Fatalf("old queue after prepend = %d/%v", oldResponse.StatusCode, old)
+	}
+}
+
+func TestQueueAPIPrependDirectoryValidationAndEmptyRoot(t *testing.T) {
+	env := setupTestEnv(t)
+	defer env.teardown()
+	createdResponse, created := postJSON(t, env.server.URL+"/api/queues", `{}`, nil)
+	if createdResponse.StatusCode != http.StatusCreated {
+		t.Fatalf("create = %d/%v", createdResponse.StatusCode, created)
+	}
+	queueID := created["queue"].(map[string]interface{})["id"].(string)
+
+	empty, emptyBody := postJSON(
+		t,
+		env.server.URL+"/api/queues/"+queueID+"/prepend-directory",
+		`{"dir":"."}`,
+		nil,
+	)
+	if empty.StatusCode != http.StatusUnprocessableEntity || emptyBody["code"] != "NO_AUDIO_FILES" {
+		t.Fatalf("empty root = %d/%v", empty.StatusCode, emptyBody)
+	}
+	invalid, invalidBody := postJSON(
+		t,
+		env.server.URL+"/api/queues/"+queueID+"/prepend-directory",
+		`{"dir":"../outside"}`,
+		nil,
+	)
+	if invalid.StatusCode != http.StatusBadRequest || invalidBody["code"] != "INVALID_DIRECTORY" {
+		t.Fatalf("invalid dir = %d/%v", invalid.StatusCode, invalidBody)
+	}
+	missing, missingBody := postJSON(
+		t,
+		env.server.URL+"/api/queues/"+queueID+"/prepend-directory",
+		`{"dir":"missing"}`,
+		nil,
+	)
+	if missing.StatusCode != http.StatusNotFound || missingBody["code"] != "NOT_FOUND" {
+		t.Fatalf("missing dir = %d/%v", missing.StatusCode, missingBody)
 	}
 }
 

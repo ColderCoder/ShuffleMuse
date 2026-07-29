@@ -279,6 +279,60 @@ func TestSelectExistingOrAtomicallyReplacesQueue(t *testing.T) {
 	}
 }
 
+func TestPrependMovesEntriesToFrontWithoutDuplicates(t *testing.T) {
+	idx := testIndex(5)
+	tagged := []string{idx.Files[1].Filepath, idx.Files[2].Filepath}
+	m := NewManager(Config{}, staticTags{"focus": tagged}, Options{Random: randomBytes(8)})
+	created, err := m.Create(context.Background(), idx, 3, CreateRequest{Tag: "focus"})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	prepended, err := m.Prepend(context.Background(), created.Queue.ID, []index.FileEntry{
+		idx.Files[4], idx.Files[2], idx.Files[0], idx.Files[2],
+	}, idx, 4)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if prepended.DirectoryTrackCount != 3 || prepended.Queue.Tag != "focus" || prepended.Queue.Total != 4 {
+		t.Fatalf("unexpected prepend result: %+v", prepended)
+	}
+	assertIDs(t, prepended.Items, []string{
+		idx.Files[4].ID, idx.Files[2].ID, idx.Files[0].ID, idx.Files[1].ID,
+	})
+	seen := make(map[string]bool)
+	for _, item := range prepended.Items {
+		if seen[item.ID] {
+			t.Fatalf("duplicate item after prepend: %+v", prepended.Items)
+		}
+		seen[item.ID] = true
+	}
+	if _, err := m.Page(created.Queue.ID, 1, idx, 4); !errors.Is(err, ErrNotFound) {
+		t.Fatalf("old queue remained after prepend: %v", err)
+	}
+}
+
+func TestPrependRejectsEmptyOrCanceledWorkWithoutReplacingQueue(t *testing.T) {
+	idx := testIndex(3)
+	m := NewManager(Config{}, nil, Options{Random: randomBytes(4)})
+	created, err := m.Create(context.Background(), idx, 1, CreateRequest{})
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := m.Prepend(context.Background(), created.Queue.ID, nil, idx, 1); !errors.Is(err, ErrNoAudioFiles) {
+		t.Fatalf("empty prepend error = %v", err)
+	}
+	canceled, cancel := context.WithCancel(context.Background())
+	cancel()
+	if _, err := m.Prepend(canceled, created.Queue.ID, []index.FileEntry{idx.Files[0]}, idx, 1); !errors.Is(err, context.Canceled) {
+		t.Fatalf("canceled prepend error = %v", err)
+	}
+	if _, err := m.Page(created.Queue.ID, 1, idx, 1); err != nil {
+		t.Fatalf("failed prepend replaced original queue: %v", err)
+	}
+}
+
 func TestSelectLargeQueueHonorsCancellationWithoutRemovingQueue(t *testing.T) {
 	idx := testIndex(5_000)
 	tagged := make([]string, 0, len(idx.Files)-1)

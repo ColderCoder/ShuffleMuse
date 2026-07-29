@@ -2,7 +2,7 @@
 import axios from 'axios'
 import { computed, onUnmounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { ChevronRight, Folder, RefreshCw } from 'lucide-vue-next'
+import { ChevronRight, Folder, ListPlus, RefreshCw } from 'lucide-vue-next'
 import * as api from '../api'
 import { usePlayerStore } from '../stores/player'
 import { useTagsStore } from '../stores/tags'
@@ -18,13 +18,24 @@ const router = useRouter()
 const currentDir = ref('.')
 const directories = ref<api.DirectoryEntry[]>([])
 const files = ref<api.BrowseFileEntry[]>([])
+const audioCount = ref(0)
 const previewFile = ref<api.BrowseFileEntry | null>(null)
 const loading = ref(false)
 const error = ref<string | null>(null)
+const queueMessage = ref<string | null>(null)
+const queueError = ref<string | null>(null)
+const prependingDirectory = ref(false)
 const page = ref(1)
 const total = ref(0)
 const pageSize = 50
 const totalPages = computed(() => Math.max(1, Math.ceil(total.value / pageSize)))
+const canPlayDirectory = computed(() => (
+  audioCount.value > 0
+  && !loading.value
+  && !prependingDirectory.value
+  && !player.playlistLoading
+  && player.queue !== null
+))
 const breadcrumbs = ref<{ label: string; path: string }[]>([])
 let browseRequest = 0
 let browseController: AbortController | null = null
@@ -45,11 +56,16 @@ async function loadFiles(dir: string, pageNum = 1) {
 	browseController?.abort()
 	const controller = new AbortController()
 	browseController = controller
+  if (dir !== currentDir.value) {
+    queueMessage.value = null
+    queueError.value = null
+  }
   currentDir.value = dir
   page.value = pageNum
   directories.value = []
   files.value = []
   total.value = 0
+  audioCount.value = 0
   breadcrumbs.value = buildBreadcrumbs(dir)
   loading.value = true
   error.value = null
@@ -59,6 +75,7 @@ async function loadFiles(dir: string, pageNum = 1) {
     files.value = result.files
     directories.value = result.directories
     total.value = result.total
+    audioCount.value = result.audioCount
     page.value = pageNum
 	} catch (caught) {
 		if (axios.isCancel(caught)) return
@@ -74,6 +91,8 @@ async function loadFiles(dir: string, pageNum = 1) {
 
 function navigate(path: string) {
   previewFile.value = null
+  queueMessage.value = null
+  queueError.value = null
   const query = path === '.' ? {} : { dir: path }
   void router.push({ name: 'browse', query })
 }
@@ -91,6 +110,26 @@ function handlePlay(file: api.BrowseFileEntry) {
     name: file.trackName ?? file.name,
     dir: file.dir,
   })
+}
+
+async function handlePlayDirectory() {
+  if (!canPlayDirectory.value) return
+  const dir = currentDir.value
+  prependingDirectory.value = true
+  queueMessage.value = null
+  queueError.value = null
+  try {
+    const count = await player.prependDirectory(dir)
+    if (count !== null && currentDir.value === dir) {
+      queueMessage.value = `Playing ${count} track${count === 1 ? '' : 's'} from this folder`
+    }
+  } catch (caught) {
+    if (!axios.isCancel(caught) && currentDir.value === dir) {
+      queueError.value = 'Failed to add this folder to the playlist'
+    }
+  } finally {
+    prependingDirectory.value = false
+  }
 }
 
 watch(() => route.query.dir, value => {
@@ -134,19 +173,32 @@ onUnmounted(() => {
       {{ library.scanError || 'Library scan failed' }}
     </p>
 
-    <nav class="breadcrumb" aria-label="Current music directory">
-      <template v-for="(crumb, index) in breadcrumbs" :key="crumb.path">
-        <ChevronRight v-if="index > 0" :size="14" class="breadcrumb-sep" aria-hidden="true" />
-        <button
-          v-if="index < breadcrumbs.length - 1"
-          class="breadcrumb-link"
-          @click="navigate(crumb.path)"
-        >
-          {{ crumb.label }}
-        </button>
-        <span v-else class="breadcrumb-current">{{ crumb.label }}</span>
-      </template>
-    </nav>
+    <div class="breadcrumb-toolbar">
+      <nav class="breadcrumb" aria-label="Current music directory">
+        <template v-for="(crumb, index) in breadcrumbs" :key="crumb.path">
+          <ChevronRight v-if="index > 0" :size="14" class="breadcrumb-sep" aria-hidden="true" />
+          <button
+            v-if="index < breadcrumbs.length - 1"
+            class="breadcrumb-link"
+            @click="navigate(crumb.path)"
+          >
+            {{ crumb.label }}
+          </button>
+          <span v-else class="breadcrumb-current">{{ crumb.label }}</span>
+        </template>
+      </nav>
+      <button
+        class="btn btn-ghost folder-play-button"
+        :disabled="!canPlayDirectory"
+        :title="audioCount === 0 ? 'No music files in this folder' : 'Move this folder to the top of the playlist and play it'"
+        @click="handlePlayDirectory"
+      >
+        <ListPlus :size="17" aria-hidden="true" />
+        <span>{{ prependingDirectory ? 'Preparing…' : 'Play folder' }}</span>
+      </button>
+    </div>
+    <p v-if="queueMessage" class="queue-message" role="status">{{ queueMessage }}</p>
+    <p v-if="queueError" class="browse-error" role="alert">{{ queueError }}</p>
 
     <div v-if="loading && files.length === 0 && directories.length === 0" class="browse-loading">Loading...</div>
     <div v-if="error" class="browse-error">{{ error }}</div>
@@ -229,14 +281,35 @@ onUnmounted(() => {
   to { transform: rotate(360deg); }
 }
 
-.breadcrumb {
+.breadcrumb-toolbar {
   display: flex;
   align-items: center;
-  flex-wrap: wrap;
-  gap: 0.25rem;
+  gap: 0.75rem;
   min-height: 32px;
   padding-bottom: 0.5rem;
   border-bottom: 1px solid var(--border);
+}
+
+.breadcrumb {
+  display: flex;
+  flex: 1 1 auto;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+  min-width: 0;
+}
+
+.folder-play-button {
+  flex: 0 0 auto;
+}
+
+.queue-message {
+  padding: 0.75rem 1rem;
+  border: 1px solid rgb(74 158 255 / 28%);
+  border-radius: var(--radius-md);
+  background: rgb(74 158 255 / 8%);
+  color: var(--text-secondary);
+  font-size: 0.8125rem;
 }
 
 .breadcrumb-link {
@@ -349,5 +422,16 @@ onUnmounted(() => {
   padding: 1rem 0;
   color: var(--text-muted);
   font-size: 0.8125rem;
+}
+
+@media (max-width: 600px) {
+  .breadcrumb-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .folder-play-button {
+    width: 100%;
+  }
 }
 </style>

@@ -59,6 +59,10 @@ export interface SelectQueueResponse extends QueuePage {
   queueIndex: number
 }
 
+export interface PrependDirectoryResponse extends QueuePage {
+  directoryTrackCount: number
+}
+
 export interface DirectoryEntry {
   name: string
   path: string
@@ -85,6 +89,7 @@ export interface BrowseResponse {
   directories: DirectoryEntry[]
   files: BrowseFileEntry[]
   total: number
+  audioCount: number
   page: number
   generation?: number
 }
@@ -210,6 +215,15 @@ export async function getQueuePage(id: string, page: number, signal?: AbortSigna
 
 export async function selectQueueItem(id: string, fileId: string, signal?: AbortSignal) {
   const res = await http.post<SelectQueueResponse>(`/queues/${encodeURIComponent(id)}/select`, { fileId }, { signal })
+  return res.data
+}
+
+export async function prependQueueDirectory(id: string, dir: string, signal?: AbortSignal) {
+  const res = await http.post<PrependDirectoryResponse>(
+    `/queues/${encodeURIComponent(id)}/prepend-directory`,
+    { dir },
+    { signal },
+  )
   return res.data
 }
 

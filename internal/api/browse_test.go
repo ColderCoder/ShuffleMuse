@@ -54,12 +54,16 @@ func TestBrowseListsMeaningfulFilesAndDirectories(t *testing.T) {
 		Directories []browseDirectory `json:"directories"`
 		Files       []browseFile      `json:"files"`
 		Total       int               `json:"total"`
+		AudioCount  int               `json:"audioCount"`
 	}
 	if err := json.NewDecoder(resp.Body).Decode(&result); err != nil {
 		t.Fatal(err)
 	}
 	if len(result.Directories) != 1 || result.Directories[0].Path != "artist1/Scans" {
 		t.Fatalf("unexpected directories: %+v", result.Directories)
+	}
+	if result.AudioCount != 3 {
+		t.Fatalf("audio count = %d, want 3 direct indexed files", result.AudioCount)
 	}
 	names := make(map[string]browseFile)
 	for _, file := range result.Files {
@@ -707,6 +711,16 @@ func TestBrowseAndMetadataRequireAuthentication(t *testing.T) {
 		if resp.StatusCode != http.StatusUnauthorized {
 			t.Errorf("GET %s status = %d, want 401", path, resp.StatusCode)
 		}
+	}
+
+	resp, body := postJSON(
+		t,
+		env.server.URL+"/api/queues/forged/prepend-directory",
+		`{"dir":"artist1"}`,
+		nil,
+	)
+	if resp.StatusCode != http.StatusUnauthorized || body["code"] != "UNAUTHORIZED" {
+		t.Errorf("POST prepend directory = %d/%v, want 401/UNAUTHORIZED", resp.StatusCode, body)
 	}
 }
 
