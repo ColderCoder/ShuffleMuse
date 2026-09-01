@@ -391,6 +391,8 @@ func TestFileMetadataEndpoint(t *testing.T) {
 	defer env.teardown()
 	env.api.Metadata = fixedMediaProbe{metadata: stream.Metadata{
 		Title:           "Metadata Title",
+		Artist:          "Metadata Artist",
+		Album:           "Metadata Album",
 		Codec:           "FLAC",
 		BitrateKbps:     987,
 		DurationSeconds: 245.5,
@@ -405,7 +407,9 @@ func TestFileMetadataEndpoint(t *testing.T) {
 	if err := json.NewDecoder(resp.Body).Decode(&metadata); err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Title != "Metadata Title" || metadata.Codec != "FLAC" || metadata.BitrateKbps != 987 || metadata.DurationSeconds != 245.5 {
+	if metadata.Title != "Metadata Title" || metadata.Artist != "Metadata Artist" ||
+		metadata.Album != "Metadata Album" || metadata.Codec != "FLAC" ||
+		metadata.BitrateKbps != 987 || metadata.DurationSeconds != 245.5 {
 		t.Fatalf("unexpected metadata: %+v", metadata)
 	}
 }
@@ -416,7 +420,7 @@ func TestMetadataAndEmbeddedCoverShareOneProbe(t *testing.T) {
 	script := `#!/bin/sh
 printf '1\n' >> "$SHUFFLEMUSE_TEST_FFPROBE_COUNT"
 cat <<'JSON'
-{"streams":[{"codec_type":"audio","codec_name":"flac","duration":"12","bit_rate":"1000000"},{"codec_type":"video","codec_name":"mjpeg","width":640,"height":640}],"format":{"duration":"12","bit_rate":"1000000","tags":{"TITLE":"Shared Title"}}}
+{"streams":[{"codec_type":"audio","codec_name":"flac","duration":"12","bit_rate":"1000000"},{"codec_type":"video","codec_name":"mjpeg","width":640,"height":640}],"format":{"duration":"12","bit_rate":"1000000","tags":{"TITLE":"Shared Title","ARTIST":"Shared Artist","ALBUM":"Shared Album"}}}
 JSON
 `
 	if err := os.WriteFile(filepath.Join(probeDir, "ffprobe"), []byte(script), 0o755); err != nil {
@@ -439,7 +443,8 @@ JSON
 		t.Fatal(err)
 	}
 	response.Body.Close()
-	if response.StatusCode != http.StatusOK || metadata.Title != "Shared Title" {
+	if response.StatusCode != http.StatusOK || metadata.Title != "Shared Title" ||
+		metadata.Artist != "Shared Artist" || metadata.Album != "Shared Album" {
 		t.Fatalf("metadata = %d/%+v", response.StatusCode, metadata)
 	}
 

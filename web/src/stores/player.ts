@@ -71,6 +71,31 @@ function errorCode(error: unknown): string | undefined {
   return typeof data?.code === 'string' ? data.code : undefined
 }
 
+type MediaMetadataConstructor = new (init?: MediaMetadataInit) => MediaMetadata
+
+function getBrowserMediaSession(): MediaSession | null {
+  try {
+    if (typeof navigator === 'undefined' || !('mediaSession' in navigator)) return null
+    return navigator.mediaSession ?? null
+  } catch {
+    return null
+  }
+}
+
+function getBrowserMediaMetadataConstructor(): MediaMetadataConstructor | null {
+  const scope = globalThis as typeof globalThis & { MediaMetadata?: MediaMetadataConstructor }
+  return scope.MediaMetadata ?? null
+}
+
+function absoluteMediaURL(path: string): string {
+  if (typeof location === 'undefined') return path
+  try {
+    return new URL(path, location.href).href
+  } catch {
+    return path
+  }
+}
+
 export const usePlayerStore = defineStore('player', () => {
   const currentTrack = ref<CurrentTrack | null>(null)
   const mediaMetadata = ref<api.FileMetadata | null>(null)
@@ -111,6 +136,7 @@ export const usePlayerStore = defineStore('player', () => {
   let queueController: AbortController | null = null
   let selectController: AbortController | null = null
   let metadataController: AbortController | null = null
+  let mediaSessionHandlersInstalled = false
   const pageRequests = new Map<number, { queueID: string; controller: AbortController; promise: Promise<api.QueueItem[]> }>()
   const pageLRU = new Map<number, number>()
   let lruClock = 0
@@ -126,6 +152,115 @@ export const usePlayerStore = defineStore('player', () => {
   // Compatibility alias for view-level empty checks. It is never the full queue.
   const playlist = computed(() => sidebarItems.value)
   const cachedPageCount = computed(() => pages.value.size)
+
+  function setMediaSessionPlaybackState(state: MediaSessionPlaybackState) {
+    const session = getBrowserMediaSession()
+    if (!session) return
+    try { session.playbackState = state } catch { /* media session is best effort */ }
+  }
+
+  function clearMediaSessionPosition(session: MediaSession | null = getBrowserMediaSession()) {
+    if (!session || typeof session.setPositionState !== 'function') return
+    try { session.setPositionState() } catch { /* media session is best effort */ }
+  }
+
+  function updateMediaSessionPosition() {
+    const session = getBrowserMediaSession()
+    if (!session || typeof session.setPositionState !== 'function') return
+    const total = duration.value
+    if (!currentTrack.value || !Number.isFinite(total) || total <= 0) {
+      clearMediaSessionPosition(session)
+      return
+    }
+    const position = clamp(Number.isFinite(currentTime.value) ? currentTime.value : 0, 0, total)
+    const rate = audio?.playbackRate
+    const playbackRate = rate !== undefined && Number.isFinite(rate) && rate > 0 ? rate : 1
+    try {
+      session.setPositionState({ duration: total, playbackRate, position })
+    } catch { /* unsupported browsers can reject invalid position state */ }
+  }
+
+  function updateMediaSessionMetadata() {
+    const session = getBrowserMediaSession()
+    if (!session) return
+    if (!currentTrack.value) {
+      try { session.metadata = null } catch { /* media session is best effort */ }
+      setMediaSessionPlaybackState('none')
+      clearMediaSessionPosition(session)
+      return
+    }
+
+    const constructor = getBrowserMediaMetadataConstructor()
+    if (!constructor) return
+    const title = displayTitle.value.trim() || currentTrack.value.name
+    const artist = mediaMetadata.value?.artist?.trim() || ''
+    const album = mediaMetadata.value?.album?.trim() || ''
+    try {
+      session.metadata = new constructor({
+        title,
+        artist,
+        album,
+        artwork: [{ src: absoluteMediaURL(api.fileCoverUrl(currentTrack.value.id)) }],
+      })
+    } catch { /* malformed/unsupported metadata must not affect playback */ }
+  }
+
+  function invokeMediaSessionAction(action: () => Promise<void>) {
+    try {
+      void action().catch(() => {})
+    } catch { /* media controls must never surface an action error */ }
+  }
+
+  function registerMediaSessionHandlers() {
+    if (mediaSessionHandlersInstalled) return
+    const session = getBrowserMediaSession()
+    if (!session || typeof session.setActionHandler !== 'function') return
+
+    const seekOffset = (details: MediaSessionActionDetails) => (
+      details.seekOffset !== undefined && Number.isFinite(details.seekOffset) && details.seekOffset > 0
+        ? details.seekOffset
+        : 10
+    )
+    const handlers: Array<[MediaSessionAction, MediaSessionActionHandler]> = [
+      ['play', () => {
+        if (currentTrack.value) invokeMediaSessionAction(resume)
+      }],
+      ['pause', () => pause()],
+      ['stop', () => {
+        const trackID = currentTrack.value?.id
+        if (!trackID) return
+        invokeMediaSessionAction(async () => {
+          pause()
+          await seek(0)
+          if (currentTrack.value?.id !== trackID || isPlaying.value || isBuffering.value) return
+          setMediaSessionPlaybackState('none')
+          clearMediaSessionPosition()
+        })
+      }],
+      ['previoustrack', () => {
+        if (currentTrack.value) invokeMediaSessionAction(previous)
+      }],
+      ['nexttrack', () => {
+        if (currentTrack.value) invokeMediaSessionAction(next)
+      }],
+      ['seekbackward', details => {
+        if (currentTrack.value) invokeMediaSessionAction(() => seek(currentTime.value - seekOffset(details)))
+      }],
+      ['seekforward', details => {
+        if (currentTrack.value) invokeMediaSessionAction(() => seek(currentTime.value + seekOffset(details)))
+      }],
+      ['seekto', details => {
+        const target = details.seekTime
+        if (currentTrack.value && target !== undefined && Number.isFinite(target)) {
+          invokeMediaSessionAction(() => seek(target))
+        }
+      }],
+    ]
+    for (const [action, handler] of handlers) {
+      try { session.setActionHandler(action, handler) } catch { /* action support varies by browser/platform */ }
+    }
+    mediaSessionHandlersInstalled = true
+  }
 
   function clearEndpointSuspendTimer() {
     if (endpointSuspendTimer === null) return
@@ -272,6 +407,7 @@ export const usePlayerStore = defineStore('player', () => {
   }
 
   function getAudio(): HTMLAudioElement {
+    registerMediaSessionHandlers()
     if (!audio) {
       audio = new Audio()
       audio.preload = 'metadata'
@@ -286,10 +422,13 @@ export const usePlayerStore = defineStore('player', () => {
         pendingMediaPlaybackIntent = 0
         isBuffering.value = false
         isPlaying.value = true
+        setMediaSessionPlaybackState('playing')
+        updateMediaSessionPosition()
       })
       audio.addEventListener('pause', () => {
         isBuffering.value = false
         isPlaying.value = false
+        setMediaSessionPlaybackState(currentTrack.value ? 'paused' : 'none')
       })
       audio.addEventListener('waiting', () => {
         if (!audio?.paused) isBuffering.value = true
@@ -306,16 +445,21 @@ export const usePlayerStore = defineStore('player', () => {
         currentTime.value = duration.value > 0
           ? clamp(absoluteTime, 0, duration.value)
           : Math.max(absoluteTime, 0)
+        updateMediaSessionPosition()
       })
       audio.addEventListener('durationchange', () => {
         if (!audio || streamMode.value !== 'original') return
-        if (Number.isFinite(audio.duration) && audio.duration > 0) duration.value = audio.duration
+        if (Number.isFinite(audio.duration) && audio.duration > 0) {
+          duration.value = audio.duration
+          updateMediaSessionPosition()
+        }
       })
       audio.addEventListener('error', () => {
         pendingMediaPlaybackIntent = 0
         error.value = 'Playback error'
         isBuffering.value = false
         isPlaying.value = false
+        setMediaSessionPlaybackState(currentTrack.value ? 'paused' : 'none')
         scheduleEndpointSuspend()
       })
     }
@@ -400,15 +544,20 @@ export const usePlayerStore = defineStore('player', () => {
     if (clearExisting) {
       mediaMetadata.value = null
       duration.value = 0
+      updateMediaSessionMetadata()
+      updateMediaSessionPosition()
     }
     try {
       const metadata = await api.getFileMetadata(trackID, controller.signal)
       if (epoch !== playEpoch || currentTrack.value?.id !== trackID || controller.signal.aborted) return
       mediaMetadata.value = metadata
       duration.value = metadata.durationSeconds
+      updateMediaSessionMetadata()
+      updateMediaSessionPosition()
     } catch (requestError) {
       if (!axios.isCancel(requestError) && epoch === playEpoch && currentTrack.value?.id === trackID) {
         mediaMetadata.value = null
+        updateMediaSessionMetadata()
       }
     } finally {
       if (metadataController === controller) metadataController = null
@@ -450,6 +599,7 @@ export const usePlayerStore = defineStore('player', () => {
     element.pause()
     sourceOffset = mode === 'opus' ? target : 0
     currentTime.value = target
+    updateMediaSessionPosition()
     const url = sourceUrl(trackID, mode, target)
     currentTrack.value = { ...currentTrack.value, streamUrl: url }
     loadedTrackID = trackID
@@ -484,11 +634,13 @@ export const usePlayerStore = defineStore('player', () => {
         pendingMediaPlaybackIntent = 0
         isPlaying.value = true
         isBuffering.value = false
+        setMediaSessionPlaybackState('playing')
       } else {
         pendingMediaPlaybackIntent = 0
         activeMediaPlaybackIntent = 0
         isPlaying.value = false
         isBuffering.value = false
+        setMediaSessionPlaybackState(currentTrack.value ? 'paused' : 'none')
         if (endpointSuspendTimer === null) scheduleEndpointSuspend()
       }
     } catch {
@@ -501,6 +653,7 @@ export const usePlayerStore = defineStore('player', () => {
       activeMediaPlaybackIntent = 0
       isPlaying.value = false
       isBuffering.value = false
+      setMediaSessionPlaybackState(currentTrack.value ? 'paused' : 'none')
       error.value = 'Failed to load track'
       scheduleEndpointSuspend()
     }
@@ -837,6 +990,7 @@ export const usePlayerStore = defineStore('player', () => {
     audio?.pause()
     isBuffering.value = false
     isPlaying.value = false
+    setMediaSessionPlaybackState(currentTrack.value ? 'paused' : 'none')
     scheduleEndpointSuspend()
   }
 
@@ -883,6 +1037,7 @@ export const usePlayerStore = defineStore('player', () => {
       pendingMediaPlaybackIntent = 0
       isPlaying.value = true
       isBuffering.value = false
+      setMediaSessionPlaybackState('playing')
       error.value = null
     } catch {
       if (epoch !== playEpoch || !isCurrentPlaybackIntent(playback)) return
@@ -890,6 +1045,7 @@ export const usePlayerStore = defineStore('player', () => {
       activeMediaPlaybackIntent = 0
       isPlaying.value = false
       isBuffering.value = false
+      setMediaSessionPlaybackState(currentTrack.value ? 'paused' : 'none')
       error.value = 'Failed to resume playback'
       scheduleEndpointSuspend()
     }
@@ -1009,6 +1165,7 @@ export const usePlayerStore = defineStore('player', () => {
     }
     const element = getAudio()
     currentTime.value = target
+    updateMediaSessionPosition()
     sourceOffset = 0
     try {
       element.currentTime = target
@@ -1063,6 +1220,7 @@ export const usePlayerStore = defineStore('player', () => {
     currentTrack.value = null
     mediaMetadata.value = null
     isPlaying.value = false
+    updateMediaSessionMetadata()
     isBuffering.value = false
     currentTime.value = 0
     duration.value = 0
@@ -1089,6 +1247,10 @@ export const usePlayerStore = defineStore('player', () => {
   watch(isMuted, muted => {
     if (audio) audio.volume = muted ? 0 : volume.value
   })
+  watch([currentTrack, mediaMetadata], () => updateMediaSessionMetadata(), { immediate: true })
+  watch([currentTrack, duration], () => updateMediaSessionPosition(), { immediate: true })
+
+  registerMediaSessionHandlers()
 
   return {
     currentTrack,

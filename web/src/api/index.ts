@@ -96,6 +96,8 @@ export interface BrowseResponse {
 
 export interface FileMetadata {
   title?: string
+  artist?: string
+  album?: string
   codec: string
   bitrateKbps: number
   bitrateApproximate: boolean

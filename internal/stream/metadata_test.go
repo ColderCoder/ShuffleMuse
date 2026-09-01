@@ -29,39 +29,46 @@ func TestMetadataFromProbeFallsBackToAverageBitrate(t *testing.T) {
 	}
 }
 
-func TestMetadataFromProbePrefersFormatTitleAndSelectsFirstAudio(t *testing.T) {
+func TestMetadataFromProbePrefersFormatTagsAndSelectsFirstAudio(t *testing.T) {
 	var probe ffprobeOutput
 	probe.Format.Duration = "20"
-	probe.Format.Tags.Title = "  Format Title  "
+	probe.Format.Tags = ffprobeTags{
+		Title: "  Format Title  ", Artist: " Format Artist ", Album: " Format Album ",
+	}
 	probe.Streams = []ffprobeStream{
 		{CodecType: "video", CodecName: "mjpeg", Width: 100, Height: 100},
-		{CodecType: "audio", CodecName: "flac", BitRate: "1000000", Tags: ffprobeTags{Title: "Stream Title"}},
-		{CodecType: "audio", CodecName: "opus", BitRate: "128000", Tags: ffprobeTags{Title: "Second Audio"}},
+		{CodecType: "audio", CodecName: "flac", BitRate: "1000000", Tags: ffprobeTags{
+			Title: "Stream Title", Artist: "Stream Artist", Album: "Stream Album",
+		}},
+		{CodecType: "audio", CodecName: "opus", BitRate: "128000", Tags: ffprobeTags{
+			Title: "Second Audio", Artist: "Second Artist", Album: "Second Album",
+		}},
 	}
 
 	metadata, err := metadataFromProbe(probe, "track.bin", 1)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if metadata.Title != "Format Title" || metadata.Codec != "FLAC" || metadata.BitrateKbps != 1000 {
+	if metadata.Title != "Format Title" || metadata.Artist != "Format Artist" ||
+		metadata.Album != "Format Album" || metadata.Codec != "FLAC" || metadata.BitrateKbps != 1000 {
 		t.Fatalf("metadata selection = %+v", metadata)
 	}
 
-	probe.Format.Tags.Title = ""
+	probe.Format.Tags = ffprobeTags{}
 	metadata, err = metadataFromProbe(probe, "track.bin", 1)
-	if err != nil || metadata.Title != "Stream Title" {
-		t.Fatalf("stream title fallback = %+v/%v", metadata, err)
+	if err != nil || metadata.Title != "Stream Title" || metadata.Artist != "Stream Artist" || metadata.Album != "Stream Album" {
+		t.Fatalf("stream tag fallback = %+v/%v", metadata, err)
 	}
 }
 
-func TestNormalizeMetadataTitleCapsUTF8WithoutSplittingRune(t *testing.T) {
-	title := strings.Repeat("界", maxMetadataTitleBytes)
-	got := normalizeMetadataTitle("  " + title + "  ")
-	if len(got) > maxMetadataTitleBytes || !utf8.ValidString(got) || !strings.HasPrefix(title, got) {
-		t.Fatalf("invalid capped title: bytes=%d valid=%v", len(got), utf8.ValidString(got))
+func TestNormalizeMetadataTextCapsUTF8WithoutSplittingRune(t *testing.T) {
+	value := strings.Repeat("界", maxMetadataTextBytes)
+	got := normalizeMetadataText("  " + value + "  ")
+	if len(got) > maxMetadataTextBytes || !utf8.ValidString(got) || !strings.HasPrefix(value, got) {
+		t.Fatalf("invalid capped metadata: bytes=%d valid=%v", len(got), utf8.ValidString(got))
 	}
 	if got == "" {
-		t.Fatal("capped title is empty")
+		t.Fatal("capped metadata is empty")
 	}
 }
 
