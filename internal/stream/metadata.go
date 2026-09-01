@@ -21,12 +21,14 @@ import (
 )
 
 const (
-	maxProbeOutputBytes   = int64(64 << 10)
-	maxMetadataTitleBytes = 512
+	maxProbeOutputBytes  = int64(64 << 10)
+	maxMetadataTextBytes = 512
 )
 
 type Metadata struct {
 	Title              string  `json:"title,omitempty"`
+	Artist             string  `json:"artist,omitempty"`
+	Album              string  `json:"album,omitempty"`
 	Codec              string  `json:"codec"`
 	BitrateKbps        int     `json:"bitrateKbps"`
 	BitrateApproximate bool    `json:"bitrateApproximate"`
@@ -281,8 +283,8 @@ func (p *MetadataProbe) probeCommand(ctx context.Context, key metadataKey) (prob
 		"ffprobe",
 		"-v", "error",
 		"-show_entries",
-		"stream=codec_type,codec_name,bit_rate,duration,width,height:stream_tags=title:"+
-			"format=bit_rate,duration:format_tags=title",
+		"stream=codec_type,codec_name,bit_rate,duration,width,height:stream_tags=title,artist,album:"+
+			"format=bit_rate,duration:format_tags=title,artist,album",
 		"-of", "json",
 		key.path,
 	)
@@ -338,7 +340,9 @@ func (p *MetadataProbe) probeCommand(ctx context.Context, key metadataKey) (prob
 }
 
 type ffprobeTags struct {
-	Title string `json:"title"`
+	Title  string `json:"title"`
+	Artist string `json:"artist"`
+	Album  string `json:"album"`
 }
 
 type ffprobeStream struct {
@@ -362,8 +366,10 @@ type ffprobeOutput struct {
 
 func metadataFromProbe(probe ffprobeOutput, path string, size int64) (Metadata, error) {
 	metadata := Metadata{
-		Codec: strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), ".")),
-		Title: normalizeMetadataTitle(probe.Format.Tags.Title),
+		Codec:  strings.ToUpper(strings.TrimPrefix(filepath.Ext(path), ".")),
+		Title:  normalizeMetadataText(probe.Format.Tags.Title),
+		Artist: normalizeMetadataText(probe.Format.Tags.Artist),
+		Album:  normalizeMetadataText(probe.Format.Tags.Album),
 	}
 	var streamBitrate string
 	var streamDuration string
@@ -372,7 +378,13 @@ func metadataFromProbe(probe ffprobeOutput, path string, size int64) (Metadata, 
 			metadata.Codec = strings.ToUpper(audio.CodecName)
 		}
 		if metadata.Title == "" {
-			metadata.Title = normalizeMetadataTitle(audio.Tags.Title)
+			metadata.Title = normalizeMetadataText(audio.Tags.Title)
+		}
+		if metadata.Artist == "" {
+			metadata.Artist = normalizeMetadataText(audio.Tags.Artist)
+		}
+		if metadata.Album == "" {
+			metadata.Album = normalizeMetadataText(audio.Tags.Album)
 		}
 		streamBitrate = audio.BitRate
 		streamDuration = audio.Duration
@@ -403,16 +415,16 @@ func firstStream(streams []ffprobeStream, codecType string) *ffprobeStream {
 	return nil
 }
 
-func normalizeMetadataTitle(title string) string {
-	title = strings.TrimSpace(title)
-	if len(title) <= maxMetadataTitleBytes {
-		return title
+func normalizeMetadataText(value string) string {
+	value = strings.TrimSpace(value)
+	if len(value) <= maxMetadataTextBytes {
+		return value
 	}
-	cut := maxMetadataTitleBytes
-	for cut > 0 && !utf8.RuneStart(title[cut]) {
+	cut := maxMetadataTextBytes
+	for cut > 0 && !utf8.RuneStart(value[cut]) {
 		cut--
 	}
-	return title[:cut]
+	return value[:cut]
 }
 
 func firstPositiveFloat(values ...string) float64 {

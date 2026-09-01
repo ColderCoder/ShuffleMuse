@@ -11,6 +11,7 @@ vi.mock('../api', () => ({
   deleteQueue: vi.fn(),
   getFileMetadata: vi.fn(),
   getFiles: vi.fn(),
+  fileCoverUrl: vi.fn((id: string) => `/api/files/${id}/cover`),
 }))
 
 class FakeAudio extends EventTarget {
@@ -47,6 +48,36 @@ class FakeAudio extends EventTarget {
 
   removeAttribute(name: string) {
     if (name === 'src') this.src = ''
+  }
+}
+
+class FakeMediaMetadata {
+  title: string
+  artist: string
+  album: string
+  artwork: MediaImage[]
+
+  constructor(init: MediaMetadataInit = {}) {
+    this.title = init.title ?? ''
+    this.artist = init.artist ?? ''
+    this.album = init.album ?? ''
+    this.artwork = init.artwork ?? []
+  }
+}
+
+class FakeMediaSession {
+  metadata: MediaMetadata | null = null
+  playbackState: MediaSessionPlaybackState = 'none'
+  handlers = new Map<MediaSessionAction, MediaSessionActionHandler>()
+  positionState: MediaPositionState | null = null
+
+  setActionHandler(action: MediaSessionAction, handler: MediaSessionActionHandler | null) {
+    if (handler) this.handlers.set(action, handler)
+    else this.handlers.delete(action)
+  }
+
+  setPositionState(state?: MediaPositionState) {
+    this.positionState = state ?? null
   }
 }
 
@@ -297,6 +328,91 @@ describe('player store server queues', () => {
 
     await player.togglePlay()
     expect(player.isPlaying).toBe(true)
+  })
+
+  it('publishes media metadata and clears stale position while handling track controls', async () => {
+    const mediaSession = new FakeMediaSession()
+    const secondMetadata = deferred<api.FileMetadata>()
+    vi.stubGlobal('navigator', { mediaSession })
+    vi.stubGlobal('MediaMetadata', FakeMediaMetadata)
+    vi.mocked(api.createQueue).mockResolvedValue(page(
+      'media-session', 1, 2, [item(0, 'one'), item(1, 'two')],
+    ))
+    vi.mocked(api.getFileMetadata).mockImplementation(id => (
+      id === 'two'
+        ? secondMetadata.promise
+        : Promise.resolve({
+            title: 'First Title',
+            artist: 'First Artist',
+            album: 'First Album',
+            codec: 'FLAC',
+            bitrateKbps: 987,
+            bitrateApproximate: false,
+            durationSeconds: 240,
+          })
+    ))
+    const player = usePlayerStore()
+
+    await player.preparePlaylist()
+    await player.playAt(0)
+    await vi.waitFor(() => expect(mediaSession.metadata?.title).toBe('First Title'))
+
+    expect(mediaSession.metadata?.artist).toBe('First Artist')
+    expect(mediaSession.metadata?.album).toBe('First Album')
+    expect(mediaSession.metadata?.artwork[0]?.src).toContain('/api/files/one/cover')
+    expect(mediaSession.playbackState).toBe('playing')
+    expect(mediaSession.positionState).toMatchObject({ duration: 240, position: 0 })
+    expect(mediaSession.handlers.has('previoustrack')).toBe(true)
+    expect(mediaSession.handlers.has('nexttrack')).toBe(true)
+
+    mediaSession.handlers.get('nexttrack')?.({ action: 'nexttrack' })
+    await vi.waitFor(() => expect(player.currentTrack?.id).toBe('two'))
+    expect(mediaSession.metadata?.title).toBe('two')
+    expect(mediaSession.positionState).toBeNull()
+
+    secondMetadata.resolve({
+      title: 'Second Title',
+      artist: 'Second Artist',
+      album: 'Second Album',
+      codec: 'OPUS',
+      bitrateKbps: 128,
+      bitrateApproximate: false,
+      durationSeconds: 180,
+    })
+    await vi.waitFor(() => expect(mediaSession.metadata?.title).toBe('Second Title'))
+    expect(mediaSession.metadata?.artist).toBe('Second Artist')
+    expect(mediaSession.metadata?.album).toBe('Second Album')
+    expect(mediaSession.positionState).toMatchObject({ duration: 180, position: 0 })
+
+    mediaSession.handlers.get('previoustrack')?.({ action: 'previoustrack' })
+    await vi.waitFor(() => expect(player.currentTrack?.id).toBe('one'))
+    expect(mediaSession.playbackState).toBe('playing')
+
+    player.reset()
+    expect(mediaSession.metadata).toBeNull()
+    expect(mediaSession.playbackState).toBe('none')
+    expect(mediaSession.positionState).toBeNull()
+  })
+
+  it('stops external playback at the beginning and clears its position', async () => {
+    const mediaSession = new FakeMediaSession()
+    vi.stubGlobal('navigator', { mediaSession })
+    vi.stubGlobal('MediaMetadata', FakeMediaMetadata)
+    const player = usePlayerStore()
+
+    await player.preparePlaylist()
+    await player.playAt(0)
+    const audio = FakeAudio.instances[0]
+    audio.currentTime = 42
+    audio.dispatchEvent(new Event('timeupdate'))
+    expect(mediaSession.positionState).toMatchObject({ position: 42 })
+
+    mediaSession.handlers.get('stop')?.({ action: 'stop' })
+    await vi.waitFor(() => expect(mediaSession.playbackState).toBe('none'))
+
+    expect(player.isPlaying).toBe(false)
+    expect(player.currentTime).toBe(0)
+    expect(mediaSession.positionState).toBeNull()
   })
 
   it('does not delay media while activating a cold audio endpoint', async () => {
