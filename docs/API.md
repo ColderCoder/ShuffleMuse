@@ -324,6 +324,8 @@ HTTP/1.1 202 Accepted
 ```json
 {
   "title": "君玉",
+  "artist": "Artist Name",
+  "album": "Album Name",
   "codec": "FLAC",
   "bitrateKbps": 986,
   "bitrateApproximate": false,
@@ -331,7 +333,7 @@ HTTP/1.1 202 Accepted
 }
 ```
 
-`title` 来自容器 TITLE，缺失时回退第一条音轨的 TITLE；两者都为空时省略该字段。标题去除首尾空白并限制为 512 个 UTF-8 字节。ffprobe 优先使用第一条音轨 bitrate，其次使用容器 bitrate；两者都缺失时按文件大小和时长估算，并设置 `bitrateApproximate:true`。
+`title`、`artist` 和 `album` 分别来自容器 TITLE、ARTIST 和 ALBUM，某个字段缺失时独立回退第一条音轨的对应标签；两处都为空时省略该字段。文本去除首尾空白并分别限制为 512 个 UTF-8 字节。ffprobe 优先使用第一条音轨 bitrate，其次使用容器 bitrate；两者都缺失时按文件大小和时长估算，并设置 `bitrateApproximate:true`。
 
 错误：`404 NOT_FOUND`、`503 MEDIA_BUSY`、`504 MEDIA_TIMEOUT`、`422 METADATA_ERROR`。
 

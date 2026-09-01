@@ -219,7 +219,7 @@ Original 使用 `http.ServeContent`：
 
 ### Metadata LRU
 
-共享 probe 一次读取 TITLE、第一音轨 codec/bitrate/duration 与第一视频流尺寸，stdout 上限 64 KiB。缓存键包含绝对路径、大小和 mtime，成功 LRU 固定默认 4096 条；确定性命令或 JSON 失败进入有界 30 秒负缓存，busy、deadline、取消和临时 I/O 不缓存。音频 metadata 与封面尺寸分别校验，任一部分无效不隐藏另一部分。底层任务使用独立 deadline；单个 waiter 取消不影响其他 waiter，全部离开才取消底层任务。
+共享 probe 一次读取 TITLE/ARTIST/ALBUM、第一音轨 codec/bitrate/duration 与第一视频流尺寸，stdout 上限 64 KiB。缓存键包含绝对路径、大小和 mtime，成功 LRU 固定默认 4096 条；确定性命令或 JSON 失败进入有界 30 秒负缓存，busy、deadline、取消和临时 I/O 不缓存。音频 metadata 与封面尺寸分别校验，任一部分无效不隐藏另一部分。底层任务使用独立 deadline；单个 waiter 取消不影响其他 waiter，全部离开才取消底层任务。
 
 ### 封面
 
@@ -253,7 +253,7 @@ HEAD/304 只读取 descriptor，不启动 FFmpeg。未转换外置图使用 `Ope
 | --- | --- |
 | `auth` | 四态认证状态机、登录/退出和显式重试 |
 | `library` | 扫描时 2 秒/空闲时 30 秒的可见页状态轮询、首次扫描、重扫和 generation |
-| `player` | Audio 元素、端点保温、队列描述/全局位置、最多 5 页 LRU、播放意图、模式和 metadata |
+| `player` | Audio 元素、Media Session 系统控制、端点保温、队列描述/全局位置、最多 5 页 LRU、播放意图、模式和 metadata |
 | `tags` | 标签云、当前 200 条标签文件页和 selection |
 
 ### 异步一致性
