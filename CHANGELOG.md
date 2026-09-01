@@ -4,6 +4,24 @@ All notable changes to ShuffleMuse are documented in this file.
 
 The project follows [Semantic Versioning](https://semver.org/).
 
+## [0.1.3] - 2026-09-01
+
+### Added
+
+- Media Session integration publishes track title, artist, album, artwork,
+  playback state, and position to supported operating-system media surfaces.
+- System and Bluetooth media actions now control play, pause, stop,
+  previous/next track, and seeking on supported browsers and platforms.
+- Audio metadata inspection now extracts ARTIST and ALBUM tags in addition to
+  TITLE, preferring container tags and falling back to the first audio stream.
+
+### Fixed
+
+- Cleared stale system timeline state while changing tracks, waiting for a new
+  duration, stopping playback, and resetting the player.
+- Made the external stop action pause at the beginning and leave the system
+  media session in the stopped state.
+
 ## [0.1.2] - 2026-07-29
 
 ### Added
@@ -72,6 +90,7 @@ The project follows [Semantic Versioning](https://semver.org/).
 - Multi-architecture GHCR image publication for `linux/amd64` and
   `linux/arm64`.
 
+[0.1.3]: https://github.com/ColderCoder/ShuffleMuse/compare/v0.1.2...v0.1.3
 [0.1.2]: https://github.com/ColderCoder/ShuffleMuse/compare/v0.1.1...v0.1.2
 [0.1.1]: https://github.com/ColderCoder/ShuffleMuse/compare/v0.1.0...v0.1.1
 [0.1.0]: https://github.com/ColderCoder/ShuffleMuse/tree/v0.1.0

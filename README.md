@@ -15,6 +15,7 @@ ShuffleMuse 是一个面向个人和小型自托管场景的轻量音乐库播�
 
 - 递归扫描 FLAC、MP3、OGG、Opus、WAV、AAC、M4A 和 WMA；索引只保存在内存中，标签持久化到 bbolt。
 - Web UI 默认播放原文件并支持 HTTP Range，也可按需实时转码为 Ogg Opus。
+- 支持的浏览器会向系统媒体界面发布曲名、艺术家、专辑、封面和进度，并接受系统或蓝牙的播放、暂停、停止、上一首、下一首和跳转操作。
 - 服务端有界随机播放队列、上一首/下一首、进度跳转、音量、静音、收藏和严格标签过滤；选择 `favorite` 后只循环收藏曲目；浏览器只缓存最多 5 个 200 首页面。
 - 搜索、目录分页浏览、图片/文本/PDF 预览及原文件下载。
 - Tags 功能区管理标签并导出 UTF-8 CSV；其 Graveyard 子页管理已经离线的已标记路径。
@@ -26,7 +27,7 @@ ShuffleMuse 是一个面向个人和小型自托管场景的轻量音乐库播�
 ## 快速部署
 
 要求 Docker Engine 和 Docker Compose 插件。默认配置拉取公开的
-`ghcr.io/coldercoder/shufflemuse:0.1.2`。把音乐文件放入项目根目录的
+`ghcr.io/coldercoder/shufflemuse:0.1.3`。把音乐文件放入项目根目录的
 `music/` 后执行：
 
 ```bash
@@ -177,7 +178,7 @@ Tags 页的 CSV 用于查看和外部处理，没有对应的导入功能，不�
 
 ## 版本与镜像
 
-- 稳定版本由对应 Git 标签发布；`v0.1.2` 对应镜像标签 `0.1.2`、`0.1`、
+- 稳定版本由对应 Git 标签发布；`v0.1.3` 对应镜像标签 `0.1.3`、`0.1`、
   `0` 和 `latest`。
 - 支持 `linux/amd64` 与 `linux/arm64`。
 - `shufflemuse --version` 输出版本、Git commit 与构建时间。
